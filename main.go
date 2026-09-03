@@ -28,7 +28,7 @@ import (
 
 const (
 	appName          = "X S5 池"
-	appVersion       = "v1.1.0"
+	appVersion       = "v1.2.0"
 	defaultListen    = ":8898"
 	workDir          = "/var/lib/xs5"
 	vpngateCSV       = "https://www.vpngate.net/api/iphone/"
@@ -43,8 +43,10 @@ const (
 
 func normalizeSource(v string) string {
 	switch strings.ToLower(strings.TrimSpace(v)) {
-	case sourceProxio, "proxyscrape": // 兼容 v0.1.x 保存的旧来源名
+	case sourceProxio, "proxyscrape": // 兼容 v0.1.x 曾把 proxyscrape 作为旧来源别名保存的配置
 		return sourceProxio
+	case sourceProxyScrape, "proxyscrape-free", "pscrape":
+		return sourceProxyScrape
 	case sourceAll:
 		return sourceAll
 	default:
@@ -56,6 +58,8 @@ func sourceLabel(v string) string {
 	switch normalizeSource(v) {
 	case sourceProxio:
 		return "Proxio"
+	case sourceProxyScrape:
+		return "ProxyScrape"
 	case sourceAll:
 		return "全部来源"
 	default:
@@ -97,6 +101,7 @@ type Node struct {
 	Sessions    int     `json:"sessions"`
 	Uptime      float64 `json:"uptime,omitempty"`
 	ISP         string  `json:"isp,omitempty"`
+	SourceHits  int     `json:"source_hits,omitempty"` // 同一 SOCKS5 端点被多少个独立来源同时收录
 	Config      string  `json:"-"`
 }
 
@@ -323,7 +328,7 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 func (a *App) index(w http.ResponseWriter, r *http.Request) { io.WriteString(w, indexHTML) }
 func (a *App) status(w http.ResponseWriter, r *http.Request) {
 	a.mu.RLock()
-	counts := map[string]int{sourceVPNGate: 0, sourceProxio: 0}
+	counts := map[string]int{sourceVPNGate: 0, sourceProxio: 0, sourceProxyScrape: 0}
 	views := make([]PoolView, 0, len(a.Pools))
 	for _, n := range a.Nodes {
 		counts[n.Source]++
@@ -386,15 +391,7 @@ func (a *App) pools(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) candidatesForLocked(country, sourceMode string) []Node {
-	sourceMode = normalizeSource(sourceMode)
-	var cands []Node
-	for _, n := range a.Nodes {
-		if n.CountryCode == country && sourceMatches(n.Source, sourceMode) {
-			cands = append(cands, n)
-		}
-	}
-	sortNodes(cands)
-	return cands
+	return buildCandidatePool(a.Nodes, country, normalizeSource(sourceMode), time.Now())
 }
 
 func (a *App) rebuildCandidatesLocked() {
@@ -641,6 +638,9 @@ func (a *App) refreshSource(selected string) error {
 		case sourceProxio:
 			nodes, err := fetchProxioNodes()
 			return result{source: sourceProxio, nodes: nodes, err: err}
+		case sourceProxyScrape:
+			nodes, err := fetchProxyScrapeNodes()
+			return result{source: sourceProxyScrape, nodes: nodes, err: err}
 		default:
 			nodes, err := fetchVPNGateNodes()
 			return result{source: sourceVPNGate, nodes: nodes, err: err}
@@ -649,10 +649,11 @@ func (a *App) refreshSource(selected string) error {
 
 	var results []result
 	if selected == sourceAll {
-		ch := make(chan result, 2)
+		ch := make(chan result, 3)
 		go func() { ch <- fetch(sourceVPNGate) }()
 		go func() { ch <- fetch(sourceProxio) }()
-		results = append(results, <-ch, <-ch)
+		go func() { ch <- fetch(sourceProxyScrape) }()
+		results = append(results, <-ch, <-ch, <-ch)
 	} else {
 		results = append(results, fetch(selected))
 	}
@@ -685,11 +686,11 @@ func (a *App) replaceSourceNodes(source string, fresh []Node) {
 		}
 	}
 	merged = append(merged, fresh...)
-	// 同源同 IP:port 去重，避免镜像偶发重复项。
+	// 这里只做源内去重，保留每个来源自己的完整视图；“全部来源”候选池再按 SOCKS5 IP:port 跨源去重。
 	seen := map[string]bool{}
 	out := merged[:0]
 	for _, n := range merged {
-		k := nodeKey(n)
+		k := sourceNodeKey(n)
 		if seen[k] {
 			continue
 		}
@@ -883,7 +884,7 @@ func fetchProxioJSON() (any, string, error) {
 			errs = append(errs, err.Error())
 			continue
 		}
-		req.Header.Set("User-Agent", "Xs5/v1.1.0")
+		req.Header.Set("User-Agent", "Xs5/"+appVersion)
 		req.Header.Set("Accept", "application/json")
 		resp, err := cli.Do(req)
 		if err != nil {
@@ -1119,6 +1120,7 @@ func (a *App) switchNext(p *Pool, phase string) {
 		err := a.activateNode(p, node, phase, deadline)
 		if err == nil {
 			state.recordSuccess(i, len(cands), nodeKey(node))
+			recordVerifiedCandidate(node, p.view().LatencyMS)
 			if a.telegram != nil {
 				go a.telegram.notifySwitchSuccess(p, before, phase)
 			}
@@ -1141,7 +1143,7 @@ func (a *App) switchNext(p *Pool, phase string) {
 
 	if resourceErr != nil {
 		// 本机资源错误时不要再主动杀掉可能仍能工作的旧 runtime。
-		// VPN Gate 失败候选在 activateVPNGate 内部已经自行清理；Proxio 预检失败则保留旧线路继续承载流量。
+		// VPN Gate 失败候选在 activateVPNGate 内部已经自行清理；SOCKS5 源预检失败则保留旧线路继续承载流量。
 		p.mu.Lock()
 		p.Status = "failed"
 		p.FailCount = 0
@@ -1186,8 +1188,8 @@ func (a *App) activateNode(p *Pool, node Node, phase string, operationDeadline t
 	p.mu.Unlock()
 
 	switch node.Source {
-	case sourceProxio:
-		// Proxio 仍先独立验证新上游；接管旧 VPN Gate runtime 时也与 VPN Gate 重操作串行。
+	case sourceProxio, sourceProxyScrape:
+		// 两个公开 SOCKS5 源都先独立验证新上游；接管旧 VPN Gate runtime 时也与 VPN Gate 重操作串行。
 		return a.activateProxio(p, node)
 	default:
 		// 所有 VPN Gate 建网、OpenVPN 启动和候选检测全局串行，避免多个池同时 fork 大量系统进程。
@@ -1306,7 +1308,7 @@ func (a *App) activateVPNGate(p *Pool, node Node, operationDeadline time.Time) e
 func (a *App) activateProxio(p *Pool, node Node) error {
 	latency, err := probeProxyConnectivity(node)
 	if err != nil {
-		return fmt.Errorf("Proxio SOCKS5 普通 HTTPS 可用性检测失败: %w", err)
+		return fmt.Errorf("%s SOCKS5 普通 HTTPS 可用性检测失败: %w", sourceLabel(node.Source), err)
 	}
 	// 新上游已经验证可用后再停止旧 runtime。若旧 runtime 是 VPN Gate，
 	// teardown 也进入同一全局串行区，避免与其他池正在创建 netns/OpenVPN 时互相抢系统资源。
@@ -1318,7 +1320,7 @@ func (a *App) activateProxio(p *Pool, node Node) error {
 	nodeLatency := measureNodeLatency(node)
 	p.mu.Lock()
 	p.ln = ln
-	p.ActiveSource = sourceProxio
+	p.ActiveSource = node.Source
 	p.ActiveIP = node.IP
 	p.ActivePort = node.Port
 	p.ActiveHost = node.Host
@@ -1336,7 +1338,7 @@ func (a *App) activateProxio(p *Pool, node Node) error {
 	p.mu.Unlock()
 	go serveSOCKS(ln, p)
 	maybeRefreshPoolExitIP(p, true)
-	log.Printf("%s/%s up: SOCKS5 :%d -> Proxio %s, ordinary HTTPS ok (%dms)", p.CountryCode, p.ID, p.Port, node.Host, latency)
+	log.Printf("%s/%s up: SOCKS5 :%d -> %s %s, ordinary HTTPS ok (%dms)", p.CountryCode, p.ID, p.Port, sourceLabel(node.Source), node.Host, latency)
 	return nil
 }
 
@@ -1360,8 +1362,8 @@ func (p *Pool) probeCurrent() (string, int, error) {
 	ns := p.ns
 	p.mu.Unlock()
 	switch source {
-	case sourceProxio:
-		return probeProxyNode(Node{Source: sourceProxio, IP: ip, Port: port})
+	case sourceProxio, sourceProxyScrape:
+		return probeProxyNode(Node{Source: source, IP: ip, Port: port})
 	case sourceVPNGate:
 		return probeVPNGate(ns)
 	default:
@@ -1475,7 +1477,7 @@ func measureNodeLatency(node Node) int {
 	if net.ParseIP(node.IP) == nil {
 		return -1
 	}
-	if node.Source == sourceProxio && node.Port > 0 {
+	if isSOCKSProxySource(node.Source) && node.Port > 0 {
 		return tcpConnectLatency(node.IP, node.Port, 3*time.Second)
 	}
 	if node.Source == sourceVPNGate {
@@ -2015,7 +2017,7 @@ func handleSOCKS(c net.Conn, p *Pool) {
 	ns := p.ns
 	p.mu.Unlock()
 
-	if source == sourceProxio {
+	if isSOCKSProxySource(source) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		upstream, err := dialSOCKS5Context(ctx, net.JoinHostPort(upIP, strconv.Itoa(upPort)), target)
 		cancel()

@@ -56,7 +56,7 @@ const indexHTML = `<!doctype html>
       <button class="picker-btn" type="button" onclick="toggleControl('sourceControl')"><span class="picker-main" id="sourceLabel">扫描来源：VPN Gate</span><span class="chev">⌄</span></button>
       <div class="dropdown" onclick="event.stopPropagation()"><div class="options" id="sourceOptions"></div></div>
     </div>
-    <div class="hint" id="sourceHint"><strong>VPN Gate</strong> 使用 OpenVPN 公共节点；Proxio 会先按可靠性、在线率和延迟做质量筛选，再进行实际 SOCKS5 出网检测。</div>
+    <div class="hint" id="sourceHint"><strong>VPN Gate</strong> 使用 OpenVPN 公共节点；Proxio 与 ProxyScrape 刷新时只做元数据轻筛选和去重，不会批量真实探测；真正的 SOCKS5 HTTPS 检测只在建立或切换出口时执行。</div>
   </section>
 
   <main class="grid" id="pools"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></main>
@@ -69,11 +69,11 @@ const indexHTML = `<!doctype html>
 <script>
 var sourceMode='vpngate',regions={},selectedCountry='',poolCache={},deleteID='',sourcePoolID='';
 var serverIP='';
-var sourceDefs=[{id:'vpngate',name:'VPN Gate',desc:'OpenVPN 公共节点'},{id:'proxio',name:'Proxio',desc:'质量筛选 SOCKS5'},{id:'all',name:'全部来源',desc:'跨源自动选择'}];
+var sourceDefs=[{id:'vpngate',name:'VPN Gate',desc:'默认优先 · OpenVPN 公共节点'},{id:'proxio',name:'Proxio',desc:'质量筛选 SOCKS5'},{id:'proxyscrape_free',name:'ProxyScrape',desc:'轻筛选 SOCKS5 备用源'},{id:'all',name:'全部来源',desc:'VPN Gate 优先 · 跨源去重'}];
 function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
 function flag(cc){cc=(cc||'').toUpperCase();if(!/^[A-Z]{2}$/.test(cc))return '🌐';return String.fromCodePoint.apply(String,Array.from(cc).map(function(c){return 127397+c.charCodeAt(0)}))}
 function when(v){return !v||String(v).indexOf('0001-')===0?'-':new Date(v).toLocaleString()}
-function sourceName(s){return ({vpngate:'VPN Gate',proxio:'Proxio',all:'全部来源',proxyscrape:'Proxio'})[s]||'-'}
+function sourceName(s){return ({vpngate:'VPN Gate',proxio:'Proxio',proxyscrape_free:'ProxyScrape',all:'全部来源',proxyscrape:'Proxio'})[s]||'-'}
 function statusLabel(s){return ({up:'正常',failed:'故障',starting:'启动中',switching:'切换中',restoring:'恢复中','no-candidates':'无可用节点',stopped:'已停止'})[s]||s||'未知'}
 function statusClass(s){return s==='up'?'ok':(s==='failed'||s==='no-candidates'?'bad':'wait')}
 function busyStatus(s){return s==='starting'||s==='switching'||s==='restoring'}

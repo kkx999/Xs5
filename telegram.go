@@ -463,9 +463,10 @@ func (t *TelegramManager) handleCallback(token string, q *tgCallback) {
 	case "m:check":
 		t.sendPoolMenu(token, chatID, "选择要手动检测的出口：", "ck:", false)
 	case "m:refresh":
-		t.sendTo(token, chatID, "选择要刷新的节点源：", tgMarkup{InlineKeyboard: [][]tgButton{{
-			{Text: "VPN Gate", CallbackData: "rf:vpngate"}, {Text: "Proxio", CallbackData: "rf:proxio"}, {Text: "全部来源", CallbackData: "rf:all"},
-		}}})
+		t.sendTo(token, chatID, "选择要刷新的节点源：", tgMarkup{InlineKeyboard: [][]tgButton{
+			{{Text: "VPN Gate", CallbackData: "rf:vpngate"}, {Text: "Proxio", CallbackData: "rf:proxio"}},
+			{{Text: "ProxyScrape", CallbackData: "rf:proxyscrape_free"}, {Text: "全部来源", CallbackData: "rf:all"}},
+		}})
 	case "m:recovery":
 		t.sendTo(token, chatID, t.recoveryText(), t.mainMenu())
 	case "m:pause":
@@ -785,7 +786,7 @@ func (t *TelegramManager) helpText() string {
 		"/status  查看全部出口状态\n" +
 		"/switch  立即切换指定出口\n" +
 		"/check  手动检测指定出口，不触发切换\n" +
-		"/refresh  刷新 VPN Gate / Proxio 节点池\n" +
+		"/refresh  刷新 VPN Gate / Proxio / ProxyScrape 节点池\n" +
 		"/recovery  查看故障、冷却和恢复状态\n" +
 		"/pause  暂停指定出口自动切换\n" +
 		"/resume  恢复指定出口自动切换\n" +

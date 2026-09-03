@@ -1,23 +1,20 @@
-# Xs5 v1.1.0
+# Xs5 v1.2.0
 
-本版本新增 Telegram 通知与远程控制，并直接复用 Xs5 现有的健康检查、切换、恢复和节点池逻辑；VPN Gate 与 Proxio 使用同一套 Telegram 状态与控制入口。
+本版本新增 ProxyScrape 第三节点源，并把候选池改为“低成本筛选 + 按需真实验证”的结构。默认仍以 VPN Gate 为首选，Proxio 与 ProxyScrape 用于补充稳定性和国家覆盖，不会因为新增来源而对全部候选执行批量网络探测。
 
-- 面板新增 Telegram 设置页，只需填写 BotFather 创建的 Bot Token。
-- Xs5 自动验证 Bot Token、自动注册机器人命令菜单，无需手工执行 BotFather `/setcommands`。
-- 点击“开始绑定”后，管理员只需向机器人发送 `/start`；Xs5 自动取得 Telegram User ID 与 Chat ID，并锁定为唯一管理员。
-- Bot Token 保存于 `/etc/xs5/telegram.json`，文件权限为 600；Web API 不返回完整 Token，只显示脱敏值。
-- 机器人使用 long polling，不需要开放额外公网端口，也不需要配置 webhook；启动时会主动清理旧 webhook。
-- 内置 `/status`、`/switch`、`/check`、`/refresh`、`/recovery`、`/pause`、`/resume`、`/logs`、`/help` 命令，并提供 Telegram Inline Keyboard 按钮操作。
-- `/switch` 直接调用 Xs5 现有切换器，固定 S5 地址、端口、用户名和密码保持不变；重复点击切换按钮不会重复排队执行同一个正在进行的操作。
-- `/check` 从固定 S5 完整链路执行一次普通 HTTPS 健康检测，只检测，不触发自动切换。
-- `/pause` 只暂停指定出口的自动健康切换，不主动停止当前线路；`/resume` 恢复自动切换。
-- 通知覆盖：服务启动摘要、连续健康检查失败并开始切换、切换/恢复成功、切换失败或候选耗尽、服务器资源异常、节点池刷新失败。
-- 切换成功通知会尽量取得并显示新的出口 IP；IP 信息查询仍不参与节点健康判定。
-- 通知带防刷屏冷却；常规 30 秒健康检查正常时不会反复发送 Telegram 消息，单纯保存 Telegram 设置也不会误报一次“Xs5 已启动”。
-- 可选每日运行摘要，默认关闭，每天约 09:00 按服务器本地时间发送。
-- Telegram 远程操作使用 User ID + Chat ID 双重校验；未绑定用户即使找到机器人也不能控制 Xs5。
-- 保留 v1.0.5 的资源保护、VPN Gate 全局串行切换、子进程回收、两个源统一本机资源错误策略。
-- 从旧版本更新不会改变已有 S5 端口、用户名、密码、国家出口和节点来源配置。
-- 发布前已通过 gofmt、`go test ./...` 与 `go vet ./...`。
+- 新增 ProxyScrape 免费 SOCKS5 节点源，使用官方机器可读镜像并保留 CDN / GitHub Raw 双入口。
+- ProxyScrape 刷新阶段只解析元数据，不做逐节点 TCP、SOCKS5 或 HTTPS 实测；不会因节点数量增加制造大规模主动探测压力。
+- ProxyScrape 仅保留 SOCKS5、合法 IP/端口、有效国家代码，并过滤明显低在线率、过高延迟、透明代理和过旧检查记录。
+- ProxyScrape 每个国家最多保留质量排序后的 30 个候选，避免大量低价值节点灌入候选池。
+- Proxio 与 ProxyScrape 各自保持源内去重；“全部来源”模式进一步按 SOCKS5 `IP:port` 做跨源去重，同一端点不会因为被两个来源收录而重复尝试。
+- 同一个 SOCKS5 端点若同时被多个独立来源收录，会记录多源命中并在同档质量下获得轻微排序优势。
+- “全部来源”采用 VPN Gate 优先的加权交错顺序：先尝试 VPN Gate，同时穿插 Proxio 与 ProxyScrape，避免 VPN Gate 连续重型失败把 90 秒切换窗口全部耗尽。
+- 新增已验证候选记录：真实建立/健康检测成功过的端点会记录最近成功时间和链路延迟；30 分钟内成功过的候选优先级最高，6 小时内仍保留普通加权，之后自动视为未知。
+- 已验证记录只来自 Xs5 实际建立或现有固定 S5 健康检查成功，不会为了填充缓存额外主动探测候选池。
+- VPN Gate、Proxio、ProxyScrape 最终上线前仍必须通过 Xs5 自己的普通 HTTPS 完整链路检测；第三方源声称“在线”只用于预筛选。
+- ProxyScrape 与 Proxio 使用同一套 SOCKS5 runtime、健康检查、失败冷却、本机资源错误保护和 Telegram 通知/控制逻辑。
+- 面板与 Telegram 的节点源选择/刷新入口均已加入 ProxyScrape。
+- 保留 v1.1.0 Telegram 通知、远程控制以及 v1.0.5 的 VPN Gate 资源保护机制。
+- 从旧版本更新不会改变已有 S5 端口、用户名、密码、国家出口、Telegram 配置和现有节点来源选择。
 
 > Xs5 使用第三方公开 VPN / SOCKS5 节点。公开节点可能不稳定、不可信或被目标站封禁，请勿通过不受信任的公共出口传输敏感明文数据。

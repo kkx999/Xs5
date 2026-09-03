@@ -99,12 +99,13 @@ func (a *App) checkPoolHealth(p *Pool) {
 		latency, err := probePoolConnectivity(p)
 		if err == nil {
 			if markConnectivityHealthy(p, id, latency) {
+				recordVerifiedRuntime(id, latency)
 				maybeRefreshPoolExitIP(p, false)
 			}
 			return
 		}
 
-		// 两个源统一处理：如果失败来自服务器本身资源不足，而不是远端出口，
+		// 所有来源统一处理：如果失败来自服务器本身资源不足，而不是远端出口，
 		// 本轮健康检查直接放弃且不累计 FailCount，避免资源抖动触发错误切换。
 		if isLocalResourceError(err) || recentLocalResourcePressure(localPressureHealthWindow) {
 			noteLocalResourcePressure()
