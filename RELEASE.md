@@ -16,5 +16,6 @@
 - 面板与 Telegram 的节点源选择/刷新入口均已加入 ProxyScrape。
 - 保留 v1.1.0 Telegram 通知、远程控制以及 v1.0.5 的 VPN Gate 资源保护机制。
 - 从旧版本更新不会改变已有 S5 端口、用户名、密码、国家出口、Telegram 配置和现有节点来源选择。
+- 发布前已通过 `gofmt`、`go test ./...`、`go vet ./...`，并对 ProxyScrape 官方 SOCKS5 JSON 做了仅元数据格式的在线冒烟检查。
 
 > Xs5 使用第三方公开 VPN / SOCKS5 节点。公开节点可能不稳定、不可信或被目标站封禁，请勿通过不受信任的公共出口传输敏感明文数据。
