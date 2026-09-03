@@ -2,11 +2,15 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
 
-const autoRetryContinueDelay = 2 * time.Second
+const (
+	autoRetryContinueDelay = 2 * time.Second
+	noCandidateRetryDelay  = time.Minute
+)
 
 type autoRetryEntry struct {
 	mu    sync.Mutex
@@ -28,14 +32,14 @@ func (a *App) scheduleAutoRetry(p *Pool) time.Duration {
 	p.mu.Lock()
 	cands := append([]Node(nil), p.Candidates...)
 	p.mu.Unlock()
-	if len(cands) == 0 {
-		return 0
-	}
 
-	now := time.Now()
-	delay := getCandidateScanState(p.ID).nextRetryDelay(cands, now)
-	if delay <= 0 {
-		delay = autoRetryContinueDelay
+	delay := noCandidateRetryDelay
+	if len(cands) > 0 {
+		now := time.Now()
+		delay = getCandidateScanState(p.ID).nextRetryDelay(cands, now)
+		if delay <= 0 {
+			delay = autoRetryContinueDelay
+		}
 	}
 
 	e := retryEntry(p.ID)
@@ -71,6 +75,24 @@ func (a *App) scheduleAutoRetry(p *Pool) time.Duration {
 	})
 	e.mu.Unlock()
 	return delay
+}
+
+func (a *App) armAutoRecovery(p *Pool) {
+	delay := a.scheduleAutoRetry(p)
+	if delay <= 0 {
+		return
+	}
+	p.mu.Lock()
+	if p.Status != "up" && p.Status != "starting" && p.Status != "restoring" && p.Status != "switching" {
+		note := fmt.Sprintf("系统将在约 %s 后自动继续寻找，无需手动操作", humanRetryDelay(delay))
+		if !strings.Contains(p.Error, "自动继续寻找") {
+			if p.Error != "" {
+				p.Error += "；"
+			}
+			p.Error += note
+		}
+	}
+	p.mu.Unlock()
 }
 
 func cancelAutoRetry(poolID string) {
