@@ -21,7 +21,9 @@ jobs:
           go-version: '1.23.x'
           cache: false
       - name: Apply v1.0.4 patch
-        run: python3 .github/patch-v1.0.4.py
+        run: |
+          python3 .github/fix-v1.0.4-patch.py
+          python3 .github/patch-v1.0.4.py
       - name: Format and test
         run: |
           gofmt -w connectivity.go health.go health_test.go main.go recovery.go
@@ -30,7 +32,7 @@ jobs:
       - name: Commit v1.0.4
         run: |
           set -euo pipefail
-          rm -f .github/patch-v1.0.4.py .github/workflows/prepare-v1.0.4.yml
+          rm -f .github/fix-v1.0.4-patch.py .github/patch-v1.0.4.py .github/workflows/prepare-v1.0.4.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
