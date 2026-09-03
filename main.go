@@ -28,7 +28,7 @@ import (
 
 const (
 	appName          = "X S5 池"
-	appVersion       = "v1.0.4"
+	appVersion       = "v1.0.5"
 	defaultListen    = ":8898"
 	workDir          = "/var/lib/xs5"
 	vpngateCSV       = "https://www.vpngate.net/api/iphone/"
@@ -132,6 +132,8 @@ type Pool struct {
 	ns            string
 	ln            net.Listener
 	ovpn          *exec.Cmd
+	ovpnDone      chan error
+	nsActive      bool
 	mu            sync.Mutex
 	opMu          sync.Mutex
 }
@@ -860,7 +862,7 @@ func fetchProxioJSON() (any, string, error) {
 			errs = append(errs, err.Error())
 			continue
 		}
-		req.Header.Set("User-Agent", "Xs5/v1.0.4")
+		req.Header.Set("User-Agent", "Xs5/v1.0.5")
 		req.Header.Set("Accept", "application/json")
 		resp, err := cli.Do(req)
 		if err != nil {
@@ -1082,6 +1084,7 @@ func (a *App) switchNext(p *Pool, phase string) {
 
 	deadline := time.Now().Add(switchAttemptWindow)
 	var lastErr error
+	var resourceErr error
 	attempted := 0
 	timedOut := false
 	for _, i := range order {
@@ -1091,17 +1094,35 @@ func (a *App) switchNext(p *Pool, phase string) {
 		}
 		node := cands[i]
 		attempted++
-		if err := a.activateNode(p, node, phase, deadline); err == nil {
+		err := a.activateNode(p, node, phase, deadline)
+		if err == nil {
 			state.recordSuccess(i, len(cands), nodeKey(node))
 			return
-		} else {
-			lastErr = err
-			state.recordFailure(i, len(cands), nodeKey(node), time.Now())
-			log.Printf("%s/%s candidate %s %s failed (本轮 %d, 候选位置 %d/%d): %v", p.CountryCode, p.ID, sourceLabel(node.Source), node.Host, attempted, i+1, len(cands), err)
+		}
+		lastErr = err
+		if isLocalResourceError(err) {
+			noteLocalResourcePressure()
+			resourceErr = err
+			log.Printf("%s/%s candidate %s %s paused by local resource pressure (候选不进入冷却): %v", p.CountryCode, p.ID, sourceLabel(node.Source), node.Host, err)
+			break
+		}
+		state.recordFailure(i, len(cands), nodeKey(node), time.Now())
+		log.Printf("%s/%s candidate %s %s failed (本轮 %d, 候选位置 %d/%d): %v", p.CountryCode, p.ID, sourceLabel(node.Source), node.Host, attempted, i+1, len(cands), err)
+		if !waitCandidateGap(node, deadline) {
+			timedOut = true
+			break
 		}
 	}
 
 	p.stopRuntime()
+	if resourceErr != nil {
+		p.mu.Lock()
+		p.Status = "failed"
+		p.FailCount = 0
+		p.mu.Unlock()
+		a.armResourceRecovery(p, resourceErr)
+		return
+	}
 	nextPos := state.cursorPosition(len(cands))
 	p.mu.Lock()
 	p.Status = "failed"
@@ -1139,10 +1160,12 @@ func (a *App) activateNode(p *Pool, node Node, phase string, operationDeadline t
 
 	switch node.Source {
 	case sourceProxio:
-		// Proxio 可以先独立验证新上游，验证通过后才接管固定 S5 端口。
+		// Proxio 仍先独立验证新上游；接管旧 VPN Gate runtime 时也与 VPN Gate 重操作串行。
 		return a.activateProxio(p, node)
 	default:
-		// VPN Gate 需要复用该池固定的 netns/网段；自动切换前已经经过三次完整链路失败确认。
+		// 所有 VPN Gate 建网、OpenVPN 启动和候选检测全局串行，避免多个池同时 fork 大量系统进程。
+		vpnGateActivationMu.Lock()
+		defer vpnGateActivationMu.Unlock()
 		p.stopRuntime()
 		return a.activateVPNGate(p, node, operationDeadline)
 	}
@@ -1152,6 +1175,15 @@ func (a *App) activateVPNGate(p *Pool, node Node, operationDeadline time.Time) e
 	if err := setupNS(p.ns, p.Port); err != nil {
 		return fmt.Errorf("创建网络隔离失败: %w", err)
 	}
+	p.mu.Lock()
+	p.nsActive = true
+	p.mu.Unlock()
+	activated := false
+	defer func() {
+		if !activated {
+			p.stopRuntime()
+		}
+	}()
 	cfg := filepath.Join(workDir, p.ns+".ovpn")
 	if err := os.WriteFile(cfg, []byte(node.Config), 0600); err != nil {
 		return fmt.Errorf("写 OpenVPN 配置失败: %w", err)
@@ -1177,11 +1209,16 @@ func (a *App) activateVPNGate(p *Pool, node Node, operationDeadline time.Time) e
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("启动 OpenVPN 失败: %w", err)
 	}
+	done := make(chan error, 1)
 	p.mu.Lock()
 	p.ovpn = cmd
+	p.ovpnDone = done
 	p.mu.Unlock()
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
+	go func() {
+		err := cmd.Wait()
+		done <- err
+		close(done)
+	}()
 	readyDeadline := time.Now().Add(35 * time.Second)
 	if !operationDeadline.IsZero() && operationDeadline.Before(readyDeadline) {
 		readyDeadline = operationDeadline
@@ -1234,6 +1271,7 @@ func (a *App) activateVPNGate(p *Pool, node Node, operationDeadline time.Time) e
 	p.mu.Unlock()
 	go serveSOCKS(ln, p)
 	maybeRefreshPoolExitIP(p, true)
+	activated = true
 	log.Printf("%s/%s up: SOCKS5 :%d -> VPN Gate %s (%s), ordinary HTTPS ok (%dms)", p.CountryCode, p.ID, p.Port, node.Host, node.IP, latency)
 	return nil
 }
@@ -1243,8 +1281,18 @@ func (a *App) activateProxio(p *Pool, node Node) error {
 	if err != nil {
 		return fmt.Errorf("Proxio SOCKS5 普通 HTTPS 可用性检测失败: %w", err)
 	}
-	// 新上游已经验证可用后再停止旧 runtime，尽量缩短切换断流窗口。
-	p.stopRuntime()
+	// 新上游已经验证可用后再停止旧 runtime。若旧 runtime 是 VPN Gate，
+	// teardown 也进入同一全局串行区，避免与其他池正在创建 netns/OpenVPN 时互相抢系统资源。
+	p.mu.Lock()
+	hadVPNRuntime := p.nsActive || p.ovpn != nil || p.ActiveSource == sourceVPNGate
+	p.mu.Unlock()
+	if hadVPNRuntime {
+		vpnGateActivationMu.Lock()
+		p.stopRuntime()
+		vpnGateActivationMu.Unlock()
+	} else {
+		p.stopRuntime()
+	}
 	ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", p.Port))
 	if err != nil {
 		return fmt.Errorf("监听 SOCKS5 端口 %d 失败: %w", p.Port, err)
@@ -1726,16 +1774,37 @@ func dialSOCKS5Context(ctx context.Context, upstream, target string) (net.Conn, 
 
 func (p *Pool) stopRuntime() {
 	p.mu.Lock()
-	if p.ln != nil {
-		_ = p.ln.Close()
-		p.ln = nil
-	}
-	if p.ovpn != nil && p.ovpn.Process != nil {
-		_ = p.ovpn.Process.Kill()
-		p.ovpn = nil
-	}
+	ln := p.ln
+	p.ln = nil
+	cmd := p.ovpn
+	done := p.ovpnDone
+	p.ovpn = nil
+	p.ovpnDone = nil
+	hadNS := p.nsActive
+	p.nsActive = false
 	p.mu.Unlock()
-	teardownNS(p.ns, p.Port)
+
+	if ln != nil {
+		_ = ln.Close()
+	}
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+	if done != nil {
+		t := time.NewTimer(openVPNReapWait)
+		select {
+		case <-done:
+			if !t.Stop() {
+				<-t.C
+			}
+		case <-t.C:
+			log.Printf("%s/%s OpenVPN process did not reap within %s", p.CountryCode, p.ID, openVPNReapWait)
+		}
+	}
+	// Proxio 没有 network namespace，不再每次切换都白白 fork ip/iptables 做无效清理。
+	if hadNS {
+		teardownNS(p.ns, p.Port)
+	}
 }
 func (p *Pool) stop() { p.stopRuntime(); p.mu.Lock(); p.Status = "stopped"; p.mu.Unlock() }
 
@@ -1946,18 +2015,39 @@ func handleSOCKS(c net.Conn, p *Pool) {
 		return
 	}
 
+	if err := acquireVPNGateRelaySlot(); err != nil {
+		_, _ = c.Write([]byte{5, 1, 0, 1, 0, 0, 0, 0, 0, 0})
+		return
+	}
+	defer releaseVPNGateRelaySlot()
+
 	cmd := exec.Command("ip", "netns", "exec", ns, "socat", "-", "TCP:"+target)
-	stdIn, _ := cmd.StdinPipe()
-	stdOut, _ := cmd.StdoutPipe()
+	stdIn, inErr := cmd.StdinPipe()
+	stdOut, outErr := cmd.StdoutPipe()
+	if inErr != nil || outErr != nil {
+		_, _ = c.Write([]byte{5, 1, 0, 1, 0, 0, 0, 0, 0, 0})
+		return
+	}
 	if err := cmd.Start(); err != nil {
+		if isLocalResourceError(err) {
+			noteLocalResourcePressure()
+		}
 		_, _ = c.Write([]byte{5, 1, 0, 1, 0, 0, 0, 0, 0, 0})
 		return
 	}
 	_, _ = c.Write([]byte{5, 0, 0, 1, 0, 0, 0, 0, 0, 0})
 	_ = c.SetDeadline(time.Time{})
-	go io.Copy(stdIn, c)
+	go func() {
+		_, _ = io.Copy(stdIn, c)
+		_ = stdIn.Close()
+	}()
 	_, _ = io.Copy(c, stdOut)
-	_ = cmd.Process.Kill()
+	_ = stdIn.Close()
+	if cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+	// 每一个 VPN Gate SOCKS 连接都必须 Wait，避免 socat 退出后留下僵尸子进程并最终耗尽 PID。
+	_ = cmd.Wait()
 }
 
 func (a *App) freePoolPortLocked() (int, error) {
