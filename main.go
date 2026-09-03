@@ -1114,8 +1114,9 @@ func (a *App) switchNext(p *Pool, phase string) {
 		}
 	}
 
-	p.stopRuntime()
 	if resourceErr != nil {
+		// 本机资源错误时不要再主动杀掉可能仍能工作的旧 runtime。
+		// VPN Gate 失败候选在 activateVPNGate 内部已经自行清理；Proxio 预检失败则保留旧线路继续承载流量。
 		p.mu.Lock()
 		p.Status = "failed"
 		p.FailCount = 0
@@ -1123,6 +1124,7 @@ func (a *App) switchNext(p *Pool, phase string) {
 		a.armResourceRecovery(p, resourceErr)
 		return
 	}
+	stopRuntimeSerialized(p)
 	nextPos := state.cursorPosition(len(cands))
 	p.mu.Lock()
 	p.Status = "failed"
@@ -1283,16 +1285,7 @@ func (a *App) activateProxio(p *Pool, node Node) error {
 	}
 	// 新上游已经验证可用后再停止旧 runtime。若旧 runtime 是 VPN Gate，
 	// teardown 也进入同一全局串行区，避免与其他池正在创建 netns/OpenVPN 时互相抢系统资源。
-	p.mu.Lock()
-	hadVPNRuntime := p.nsActive || p.ovpn != nil || p.ActiveSource == sourceVPNGate
-	p.mu.Unlock()
-	if hadVPNRuntime {
-		vpnGateActivationMu.Lock()
-		p.stopRuntime()
-		vpnGateActivationMu.Unlock()
-	} else {
-		p.stopRuntime()
-	}
+	stopRuntimeSerialized(p)
 	ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", p.Port))
 	if err != nil {
 		return fmt.Errorf("监听 SOCKS5 端口 %d 失败: %w", p.Port, err)
@@ -1794,9 +1787,7 @@ func (p *Pool) stopRuntime() {
 		t := time.NewTimer(openVPNReapWait)
 		select {
 		case <-done:
-			if !t.Stop() {
-				<-t.C
-			}
+			t.Stop()
 		case <-t.C:
 			log.Printf("%s/%s OpenVPN process did not reap within %s", p.CountryCode, p.ID, openVPNReapWait)
 		}
