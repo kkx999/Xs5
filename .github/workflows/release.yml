@@ -1,0 +1,83 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - VERSION
+      - '**.go'
+      - go.mod
+      - install.sh
+      - uninstall.sh
+      - install-latest.sh
+      - xs5.sh
+      - xs5.service
+      - README.md
+      - RELEASE.md
+      - LICENSE
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache: false
+      - name: Test
+        run: |
+          go test ./...
+          go vet ./...
+      - name: Read version
+        id: version
+        shell: bash
+        run: |
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Skip existing release
+        id: exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build packages
+        if: steps.exists.outputs.exists != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          mkdir -p dist
+          for ARCH in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -trimpath -ldflags '-s -w' -o xs5d .
+            PKG="xs5-v${VERSION}-linux-${ARCH}"
+            mkdir -p "dist/$PKG"
+            cp xs5d install.sh uninstall.sh xs5.sh xs5.service README.md LICENSE "dist/$PKG/"
+            (cd "dist/$PKG" && tar -czf "../${PKG}.tar.gz" .)
+            rm -rf "dist/$PKG" xs5d
+          done
+          (cd dist && sha256sum xs5-v${VERSION}-linux-*.tar.gz > SHA256SUMS)
+      - name: Create GitHub Release
+        if: steps.exists.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          gh release create "$TAG" \
+            dist/xs5-${TAG}-linux-amd64.tar.gz \
+            dist/xs5-${TAG}-linux-arm64.tar.gz \
+            dist/SHA256SUMS \
+            --target "$GITHUB_SHA" \
+            --title "Xs5 $TAG" \
+            --notes-file RELEASE.md
