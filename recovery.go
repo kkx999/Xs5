@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	autoRetryContinueDelay = 2 * time.Second
+	autoRetryContinueDelay = 15 * time.Second
 	noCandidateRetryDelay  = time.Minute
 )
 

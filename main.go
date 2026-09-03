@@ -28,7 +28,7 @@ import (
 
 const (
 	appName          = "X S5 池"
-	appVersion       = "v1.0.3"
+	appVersion       = "v1.0.4"
 	defaultListen    = ":8898"
 	workDir          = "/var/lib/xs5"
 	vpngateCSV       = "https://www.vpngate.net/api/iphone/"
@@ -860,7 +860,7 @@ func fetchProxioJSON() (any, string, error) {
 			errs = append(errs, err.Error())
 			continue
 		}
-		req.Header.Set("User-Agent", "Xs5/v1.0.3")
+		req.Header.Set("User-Agent", "Xs5/v1.0.4")
 		req.Header.Set("Accept", "application/json")
 		resp, err := cli.Do(req)
 		if err != nil {
@@ -1137,11 +1137,13 @@ func (a *App) activateNode(p *Pool, node Node, phase string, operationDeadline t
 	p.Error = ""
 	p.mu.Unlock()
 
-	p.stopRuntime()
 	switch node.Source {
 	case sourceProxio:
+		// Proxio 可以先独立验证新上游，验证通过后才接管固定 S5 端口。
 		return a.activateProxio(p, node)
 	default:
+		// VPN Gate 需要复用该池固定的 netns/网段；自动切换前已经经过三次完整链路失败确认。
+		p.stopRuntime()
 		return a.activateVPNGate(p, node, operationDeadline)
 	}
 }
@@ -1203,9 +1205,9 @@ func (a *App) activateVPNGate(p *Pool, node Node, operationDeadline time.Time) e
 		}
 		return fmt.Errorf("等待 tun0 就绪超时; %s", tailFile(logPath, 8))
 	}
-	exit, latency, err := probeVPNGate(p.ns)
+	latency, err := probeVPNConnectivity(p.ns)
 	if err != nil {
-		return fmt.Errorf("隧道已建立但出口检测失败: %w; %s", err, tailFile(logPath, 5))
+		return fmt.Errorf("隧道已建立但普通 HTTPS 可用性检测失败: %w; %s", err, tailFile(logPath, 5))
 	}
 	ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", p.Port))
 	if err != nil {
@@ -1218,25 +1220,31 @@ func (a *App) activateVPNGate(p *Pool, node Node, operationDeadline time.Time) e
 	p.ActiveIP = node.IP
 	p.ActivePort = 0
 	p.ActiveHost = node.Host
-	p.ExitIP = exit
+	p.ExitIP = ""
 	p.LatencyMS = latency
 	p.NodeLatencyMS = nodeLatency
+	p.IPType = ""
+	p.IPISP = ""
+	p.IPASN = ""
+	p.IPRisk = ""
 	p.Status = "up"
 	p.Error = ""
 	p.LastSwitch = time.Now()
 	p.FailCount = 0
 	p.mu.Unlock()
 	go serveSOCKS(ln, p)
-	go enrichPoolIPProfile(p, exit)
-	log.Printf("%s/%s up: SOCKS5 :%d -> VPN Gate %s (%s) -> %s (%dms)", p.CountryCode, p.ID, p.Port, node.Host, node.IP, exit, latency)
+	maybeRefreshPoolExitIP(p, true)
+	log.Printf("%s/%s up: SOCKS5 :%d -> VPN Gate %s (%s), ordinary HTTPS ok (%dms)", p.CountryCode, p.ID, p.Port, node.Host, node.IP, latency)
 	return nil
 }
 
 func (a *App) activateProxio(p *Pool, node Node) error {
-	exit, latency, err := probeProxyNode(node)
+	latency, err := probeProxyConnectivity(node)
 	if err != nil {
-		return fmt.Errorf("Proxio SOCKS5 检测失败: %w", err)
+		return fmt.Errorf("Proxio SOCKS5 普通 HTTPS 可用性检测失败: %w", err)
 	}
+	// 新上游已经验证可用后再停止旧 runtime，尽量缩短切换断流窗口。
+	p.stopRuntime()
 	ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", p.Port))
 	if err != nil {
 		return fmt.Errorf("监听 SOCKS5 端口 %d 失败: %w", p.Port, err)
@@ -1248,17 +1256,21 @@ func (a *App) activateProxio(p *Pool, node Node) error {
 	p.ActiveIP = node.IP
 	p.ActivePort = node.Port
 	p.ActiveHost = node.Host
-	p.ExitIP = exit
+	p.ExitIP = ""
 	p.LatencyMS = latency
 	p.NodeLatencyMS = nodeLatency
+	p.IPType = ""
+	p.IPISP = ""
+	p.IPASN = ""
+	p.IPRisk = ""
 	p.Status = "up"
 	p.Error = ""
 	p.LastSwitch = time.Now()
 	p.FailCount = 0
 	p.mu.Unlock()
 	go serveSOCKS(ln, p)
-	go enrichPoolIPProfile(p, exit)
-	log.Printf("%s/%s up: SOCKS5 :%d -> Proxio %s -> %s (%dms)", p.CountryCode, p.ID, p.Port, node.Host, exit, latency)
+	maybeRefreshPoolExitIP(p, true)
+	log.Printf("%s/%s up: SOCKS5 :%d -> Proxio %s, ordinary HTTPS ok (%dms)", p.CountryCode, p.ID, p.Port, node.Host, latency)
 	return nil
 }
 

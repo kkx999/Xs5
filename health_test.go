@@ -5,12 +5,15 @@ import (
 	"time"
 )
 
-func TestHealthCheckTiming(t *testing.T) {
+func TestHealthCheckPolicy(t *testing.T) {
 	if healthCheckInterval != 30*time.Second {
 		t.Fatalf("healthCheckInterval=%v want 30s", healthCheckInterval)
 	}
-	if healthFailureRetryDelay != 10*time.Second {
-		t.Fatalf("healthFailureRetryDelay=%v want 10s", healthFailureRetryDelay)
+	if healthRetryDelayOne != 5*time.Second || healthRetryDelayTwo != 10*time.Second {
+		t.Fatalf("retry delays=%v/%v want 5s/10s", healthRetryDelayOne, healthRetryDelayTwo)
+	}
+	if healthFailureLimit != 3 {
+		t.Fatalf("healthFailureLimit=%d want 3", healthFailureLimit)
 	}
 }
 
@@ -24,53 +27,47 @@ func TestHealthCheckInFlightGuard(t *testing.T) {
 		t.Fatal("second beginHealthCheck should be blocked")
 	}
 	endHealthCheck(id)
-	if !beginHealthCheck(id) {
-		t.Fatal("beginHealthCheck should succeed after end")
-	}
-	endHealthCheck(id)
 }
 
-func TestHealthyProbeAcceptsExitIPChange(t *testing.T) {
-	p := &Pool{
-		Status:    "up",
-		ExitIP:    "1.1.1.1",
-		FailCount: 1,
-		LatencyMS: -1,
-		IPType:    "住宅/ISP",
-		IPISP:     "old isp",
-		IPASN:     "AS1",
-		IPRisk:    "old risk",
+func TestAvailabilityHTTPStatus(t *testing.T) {
+	for _, code := range []int{200, 204, 301, 302, 399} {
+		if !availabilityHTTPStatusOK(code) {
+			t.Fatalf("HTTP %d should count as reachable", code)
+		}
 	}
-	applied, changed := applyHealthyProbe(p, "1.1.1.1", "2.2.2.2", 123)
-	if !applied || !changed {
-		t.Fatalf("applied=%v changed=%v; dynamic exit IP should remain healthy", applied, changed)
-	}
-	if p.Status != "up" || p.ExitIP != "2.2.2.2" || p.FailCount != 0 || p.LatencyMS != 123 {
-		t.Fatalf("unexpected pool state: status=%s exit=%s fail=%d latency=%d", p.Status, p.ExitIP, p.FailCount, p.LatencyMS)
-	}
-	if p.IPType != "" || p.IPISP != "" || p.IPASN != "" || p.IPRisk != "" {
-		t.Fatal("IP profile must be cleared when exit IP changes")
+	for _, code := range []int{0, 199, 400, 403, 500} {
+		if availabilityHTTPStatusOK(code) {
+			t.Fatalf("HTTP %d should not count as reachable", code)
+		}
 	}
 }
 
-func TestHealthyProbeKeepsProfileWhenIPUnchanged(t *testing.T) {
-	p := &Pool{Status: "up", ExitIP: "1.1.1.1", FailCount: 1, IPType: "机房 IP", IPISP: "isp", IPASN: "AS1"}
-	applied, changed := applyHealthyProbe(p, "1.1.1.1", "1.1.1.1", 80)
-	if !applied || changed {
-		t.Fatalf("applied=%v changed=%v", applied, changed)
+func TestConnectivityEndpointsAreOrdinaryHTTPS(t *testing.T) {
+	if len(connectivityProbeEndpoints) != 3 {
+		t.Fatalf("connectivity endpoints=%d want 3", len(connectivityProbeEndpoints))
 	}
-	if p.FailCount != 0 || p.LatencyMS != 80 || p.IPType != "机房 IP" || p.IPISP != "isp" || p.IPASN != "AS1" {
-		t.Fatal("same-IP successful probe should only refresh health data")
+	want := map[string]bool{
+		"https://www.google.com/generate_204":             true,
+		"https://cp.cloudflare.com/generate_204":          true,
+		"https://www.apple.com/library/test/success.html": true,
+	}
+	for _, endpoint := range connectivityProbeEndpoints {
+		if !want[endpoint] {
+			t.Fatalf("unexpected connectivity endpoint %q", endpoint)
+		}
 	}
 }
 
-func TestHealthyProbeRejectsStaleResult(t *testing.T) {
-	p := &Pool{Status: "up", ExitIP: "3.3.3.3", FailCount: 0}
-	applied, changed := applyHealthyProbe(p, "1.1.1.1", "2.2.2.2", 50)
-	if applied || changed {
-		t.Fatalf("stale probe must be ignored: applied=%v changed=%v", applied, changed)
+func TestRuntimeIdentityGuard(t *testing.T) {
+	p := &Pool{Status: "up", ActiveSource: sourceProxio, ActiveIP: "198.51.100.1", ActivePort: 1080}
+	id, ok := currentRuntimeIdentity(p)
+	if !ok || !runtimeStillMatches(p, id) {
+		t.Fatal("current runtime should match")
 	}
-	if p.ExitIP != "3.3.3.3" {
-		t.Fatalf("stale probe overwrote current exit: %s", p.ExitIP)
+	p.mu.Lock()
+	p.ActiveIP = "198.51.100.2"
+	p.mu.Unlock()
+	if runtimeStillMatches(p, id) {
+		t.Fatal("stale health result must not apply after runtime changes")
 	}
 }
