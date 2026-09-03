@@ -1,0 +1,16 @@
+[Unit]
+Description=Xs5 - Dynamic country SOCKS5 pool
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/xs5/xs5.env
+ExecStart=/usr/local/bin/xs5d
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target
