@@ -1,0 +1,38 @@
+name: Prepare Xs5 v1.0.4
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/prepare-v1.0.4.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache: false
+      - name: Apply v1.0.4 patch
+        run: python3 .github/patch-v1.0.4.py
+      - name: Format and test
+        run: |
+          gofmt -w connectivity.go health.go health_test.go main.go recovery.go
+          go test ./...
+          go vet ./...
+      - name: Commit v1.0.4
+        run: |
+          set -euo pipefail
+          rm -f .github/patch-v1.0.4.py .github/workflows/prepare-v1.0.4.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'release: Xs5 v1.0.4 unified connectivity health'
+          git push origin HEAD:main
