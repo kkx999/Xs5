@@ -28,7 +28,7 @@ import (
 
 const (
 	appName          = "X S5 池"
-	appVersion       = "v1.0.0"
+	appVersion       = "v1.0.1"
 	defaultListen    = ":8898"
 	workDir          = "/var/lib/xs5"
 	vpngateCSV       = "https://www.vpngate.net/api/iphone/"
@@ -521,6 +521,7 @@ func (a *App) deletePool(w http.ResponseWriter, r *http.Request) {
 	if p != nil {
 		p.stop()
 	}
+	dropCandidateScanState(id)
 	writeJSON(w, 200, map[string]string{"ok": "deleted"})
 }
 
@@ -571,6 +572,7 @@ func (a *App) setPoolSource(w http.ResponseWriter, r *http.Request) {
 	p.Status = "switching"
 	p.Error = ""
 	p.mu.Unlock()
+	resetCandidateScanState(id)
 	if err := a.savePoolsLocked(); err != nil {
 		a.mu.Unlock()
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
@@ -857,7 +859,7 @@ func fetchProxioJSON() (any, string, error) {
 			errs = append(errs, err.Error())
 			continue
 		}
-		req.Header.Set("User-Agent", "Xs5/v1.0.0")
+		req.Header.Set("User-Agent", "Xs5/v1.0.1")
 		req.Header.Set("Accept", "application/json")
 		resp, err := cli.Do(req)
 		if err != nil {
@@ -1054,23 +1056,14 @@ func (a *App) switchNext(p *Pool, phase string) {
 
 	p.mu.Lock()
 	cands := append([]Node(nil), p.Candidates...)
-	p.mu.Unlock()
-	cands = prioritizeUnused(cands, a.usedNodeKeys(p.CountryCode, p.ID))
-	p.mu.Lock()
-	p.Candidates = append([]Node(nil), cands...)
-	curKey := fmt.Sprintf("%s|%s|%d|%s", p.ActiveSource, p.ActiveIP, p.ActivePort, p.ActiveHost)
+	previousStatus := p.Status
 	if phase == "" {
 		phase = "switching"
 	}
 	p.Status = phase
 	p.Error = ""
-	p.LatencyMS = -1
-	p.NodeLatencyMS = -1
-	p.IPType = ""
-	p.IPISP = ""
-	p.IPASN = ""
-	p.IPRisk = ""
 	p.mu.Unlock()
+
 	if len(cands) == 0 {
 		p.mu.Lock()
 		p.Status = "failed"
@@ -1078,66 +1071,82 @@ func (a *App) switchNext(p *Pool, phase string) {
 		p.mu.Unlock()
 		return
 	}
-	idx := 0
-	for i, n := range cands {
-		if nodeKey(n) == curKey {
-			idx = i + 1
-			break
+
+	state := getCandidateScanState(p.ID)
+	order, cooling, earliest := state.attemptOrder(cands, a.usedNodeKeys(p.CountryCode, p.ID), time.Now())
+	if len(order) == 0 {
+		p.mu.Lock()
+		if previousStatus == "up" {
+			p.Status = "up"
+		} else {
+			p.Status = "failed"
 		}
+		p.Error = fmt.Sprintf("当前 %d/%d 个候选均处于 5 分钟冷却中，最早约 %s 后可重新尝试；不会重复检测刚失败的节点", cooling, len(cands), cooldownWait(earliest, time.Now()))
+		p.mu.Unlock()
+		return
 	}
+
+	p.mu.Lock()
+	p.LatencyMS = -1
+	p.NodeLatencyMS = -1
+	p.IPType = ""
+	p.IPISP = ""
+	p.IPASN = ""
+	p.IPRisk = ""
+	p.mu.Unlock()
 
 	deadline := time.Now().Add(switchAttemptWindow)
 	var lastErr error
 	attempted := 0
 	timedOut := false
-	for off := 0; off < len(cands); off++ {
+	for _, i := range order {
 		if time.Now().After(deadline) {
 			timedOut = true
 			break
 		}
-		i := (idx + off) % len(cands)
+		node := cands[i]
 		attempted++
-		if err := a.activate(p, i, phase, deadline); err == nil {
+		if err := a.activateNode(p, node, phase, deadline); err == nil {
+			state.recordSuccess(i, len(cands), nodeKey(node))
 			return
 		} else {
 			lastErr = err
-			log.Printf("%s/%s candidate %s %s failed (%d/%d): %v", p.CountryCode, p.ID, sourceLabel(cands[i].Source), cands[i].Host, attempted, len(cands), err)
+			state.recordFailure(i, len(cands), nodeKey(node), time.Now())
+			log.Printf("%s/%s candidate %s %s failed (本轮 %d, 候选位置 %d/%d): %v", p.CountryCode, p.ID, sourceLabel(node.Source), node.Host, attempted, i+1, len(cands), err)
 		}
 	}
+
 	p.stopRuntime()
+	nextPos := state.cursorPosition(len(cands))
 	p.mu.Lock()
 	p.Status = "failed"
+	continuation := fmt.Sprintf("；失败节点冷却 5 分钟；再次点击立即切换将从第 %d/%d 个候选继续", nextPos, len(cands))
 	switch {
 	case timedOut || time.Now().After(deadline):
 		if lastErr != nil {
-			p.Error = fmt.Sprintf("90 秒内已尝试 %d/%d 个候选，仍未找到可用节点；最后错误：%v", attempted, len(cands), lastErr)
+			p.Error = fmt.Sprintf("90 秒内本轮已尝试 %d 个候选（%d 个仍在冷却），仍未找到可用节点%s；最后错误：%v", attempted, cooling, continuation, lastErr)
 		} else {
-			p.Error = fmt.Sprintf("90 秒内已尝试 %d/%d 个候选，仍未找到可用节点", attempted, len(cands))
+			p.Error = fmt.Sprintf("90 秒内本轮已尝试 %d 个候选（%d 个仍在冷却），仍未找到可用节点%s", attempted, cooling, continuation)
 		}
-	case attempted >= len(cands):
+	case attempted >= len(order):
 		if lastErr != nil {
-			p.Error = fmt.Sprintf("已尝试全部 %d 个候选，均不可用；最后错误：%v", attempted, lastErr)
+			p.Error = fmt.Sprintf("本轮可尝试的 %d 个候选均不可用（另有 %d 个处于冷却）%s；最后错误：%v", attempted, cooling, continuation, lastErr)
 		} else {
-			p.Error = fmt.Sprintf("已尝试全部 %d 个候选，均不可用", attempted)
+			p.Error = fmt.Sprintf("本轮可尝试的 %d 个候选均不可用（另有 %d 个处于冷却）%s", attempted, cooling, continuation)
 		}
 	case lastErr != nil:
-		p.Error = lastErr.Error()
+		p.Error = lastErr.Error() + continuation
 	default:
-		p.Error = "候选节点均不可用"
+		p.Error = "候选节点均不可用" + continuation
 	}
 	p.mu.Unlock()
 }
 
-func (a *App) activate(p *Pool, idx int, phase string, operationDeadline time.Time) error {
-	p.mu.Lock()
-	if idx >= len(p.Candidates) {
-		p.mu.Unlock()
-		return errors.New("candidate out of range")
-	}
-	node := p.Candidates[idx]
+func (a *App) activateNode(p *Pool, node Node, phase string, operationDeadline time.Time) error {
 	if phase == "" {
 		phase = "starting"
 	}
+	p.mu.Lock()
 	p.Status = phase
 	p.Error = ""
 	p.mu.Unlock()
