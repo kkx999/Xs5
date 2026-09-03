@@ -1,4 +1,4 @@
-name: Apply v1.0.2 automatic recovery
+name: Apply final v1.0.2
 
 on:
   push:
@@ -21,143 +21,10 @@ jobs:
           go-version: '1.23.x'
           cache: false
       - name: Apply source patch
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 <<'PY'
-          from pathlib import Path
-
-          p = Path('main.go')
-          s = p.read_text()
-
-          s = s.replace('appVersion       = "v1.0.1"', 'appVersion       = "v1.0.2"')
-          s = s.replace('Xs5/v1.0.1', 'Xs5/v1.0.2')
-
-          old = '''func (a *App) switchNext(p *Pool, phase string) {
-          \tp.opMu.Lock()
-          \tdefer p.opMu.Unlock()
-'''
-          new = '''func (a *App) switchNext(p *Pool, phase string) {
-          \tcancelAutoRetry(p.ID)
-          \tp.opMu.Lock()
-          \tdefer p.opMu.Unlock()
-'''
-          if old not in s:
-              raise SystemExit('switchNext header anchor not found')
-          s = s.replace(old, new, 1)
-
-          old = '''\tif len(cands) == 0 {
-          \t\tp.mu.Lock()
-          \t\tp.Status = "failed"
-          \t\tp.Error = "没有可用候选节点"
-          \t\tp.mu.Unlock()
-          \t\treturn
-          \t}
-'''
-          new = '''\tif len(cands) == 0 {
-          \t\tp.mu.Lock()
-          \t\tp.Status = "failed"
-          \t\tp.Error = "没有可用候选节点"
-          \t\tp.mu.Unlock()
-          \t\ta.armAutoRecovery(p)
-          \t\treturn
-          \t}
-'''
-          if old not in s:
-              raise SystemExit('no candidates anchor not found')
-          s = s.replace(old, new, 1)
-
-          old = '''\t\tp.mu.Unlock()
-          \t\treturn
-          \t}
-
-          \tp.mu.Lock()
-          \tp.LatencyMS = -1
-'''
-          new = '''\t\tp.mu.Unlock()
-          \t\ta.armAutoRecovery(p)
-          \t\treturn
-          \t}
-
-          \tp.mu.Lock()
-          \tp.LatencyMS = -1
-'''
-          if old not in s:
-              raise SystemExit('all cooling anchor not found')
-          s = s.replace(old, new, 1)
-
-          old = '''\tp.mu.Unlock()
-          }
-
-          func (a *App) activateNode'''
-          new = '''\tp.mu.Unlock()
-          \ta.armAutoRecovery(p)
-          }
-
-          func (a *App) activateNode'''
-          if old not in s:
-              raise SystemExit('switchNext tail anchor not found')
-          s = s.replace(old, new, 1)
-
-          old = '''\tdropCandidateScanState(id)
-          \twriteJSON(w, 200, map[string]string{"ok": "deleted"})'''
-          new = '''\tdropCandidateScanState(id)
-          \tdropAutoRetry(id)
-          \twriteJSON(w, 200, map[string]string{"ok": "deleted"})'''
-          if old not in s:
-              raise SystemExit('delete cleanup anchor not found')
-          s = s.replace(old, new, 1)
-
-          old = '''\t\tif len(p.Candidates) == 0 {
-          \t\t\tp.mu.Lock()
-          \t\t\tp.Status = "no-candidates"
-          \t\t\tp.Error = "没有可用候选节点"
-          \t\t\tp.mu.Unlock()
-          \t\t\tcontinue
-          \t\t}
-'''
-          new = '''\t\tif len(p.Candidates) == 0 {
-          \t\t\tp.mu.Lock()
-          \t\t\tp.Status = "no-candidates"
-          \t\t\tp.Error = "没有可用候选节点"
-          \t\t\tp.mu.Unlock()
-          \t\t\ta.armAutoRecovery(p)
-          \t\t\tcontinue
-          \t\t}
-'''
-          if old not in s:
-              raise SystemExit('restore no candidates anchor not found')
-          s = s.replace(old, new, 1)
-
-          p.write_text(s)
-
-          install = Path('install.sh')
-          x = install.read_text()
-          if 'VERSION=1.0.1' not in x:
-              raise SystemExit('install.sh version anchor not found')
-          install.write_text(x.replace('VERSION=1.0.1', 'VERSION=1.0.2', 1))
-
-          Path('VERSION').write_text('1.0.2\n')
-          Path('RELEASE.md').write_text('''# Xs5 v1.0.2
-
-本版本补全无人值守出口恢复逻辑。
-
-- 正常出口继续每 12 秒进行一次真实出网健康检查。
-- 连续 2 次健康检查失败后自动切换候选。
-- 单轮 90 秒未找到可用节点时，不再停在“故障”等待人工点击。
-- 仍有未尝试/已冷却候选时，约 2 秒后自动从上次扫描位置继续。
-- 所有候选都处于冷却时，等待最早一个 5 分钟冷却到期后自动继续。
-- 启动时暂时没有候选节点，也会周期性自动恢复，不需要人工干预。
-- 删除出口会同步清理自动恢复定时器。
-- 保留 v1.0.1 的扫描游标与 5 分钟失败候选冷却机制。
-- 更新不会改变现有 S5 端口、用户名、密码和国家出口配置。
-
-> Xs5 使用第三方公开 VPN / SOCKS5 节点。公开节点可能不稳定、不可信或被目标站封禁，请勿通过不受信任的公共出口传输敏感明文数据。
-''')
-          PY
+        run: python3 scripts/apply_v1_0_2_final.py
       - name: Format and test
         run: |
-          gofmt -w main.go scan_state.go recovery.go scan_state_test.go
+          gofmt -w main.go scan_state.go recovery.go health.go scan_state_test.go health_test.go
           go test ./...
           go vet ./...
       - name: Commit v1.0.2
@@ -166,12 +33,10 @@ jobs:
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add main.go scan_state.go recovery.go scan_state_test.go install.sh VERSION RELEASE.md
+          git add main.go scan_state.go recovery.go health.go health_test.go install.sh VERSION RELEASE.md
           if git diff --cached --quiet; then
             echo 'No changes to commit'
             exit 0
           fi
-          git commit -m 'release: Xs5 v1.0.2 automatic failed-exit recovery'
+          git commit -m 'release: Xs5 v1.0.2 automatic recovery and health checks'
           git push origin HEAD:main
-
-# trigger: v1.0.2
