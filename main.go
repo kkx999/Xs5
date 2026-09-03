@@ -28,7 +28,7 @@ import (
 
 const (
 	appName          = "X S5 池"
-	appVersion       = "v1.0.1"
+	appVersion       = "v1.0.2"
 	defaultListen    = ":8898"
 	workDir          = "/var/lib/xs5"
 	vpngateCSV       = "https://www.vpngate.net/api/iphone/"
@@ -522,6 +522,7 @@ func (a *App) deletePool(w http.ResponseWriter, r *http.Request) {
 		p.stop()
 	}
 	dropCandidateScanState(id)
+	dropAutoRetry(id)
 	writeJSON(w, 200, map[string]string{"ok": "deleted"})
 }
 
@@ -859,7 +860,7 @@ func fetchProxioJSON() (any, string, error) {
 			errs = append(errs, err.Error())
 			continue
 		}
-		req.Header.Set("User-Agent", "Xs5/v1.0.1")
+		req.Header.Set("User-Agent", "Xs5/v1.0.2")
 		req.Header.Set("Accept", "application/json")
 		resp, err := cli.Do(req)
 		if err != nil {
@@ -1014,8 +1015,9 @@ func sortNodes(n []Node) {
 }
 
 func (a *App) healthLoop() {
-	for {
-		time.Sleep(12 * time.Second)
+	ticker := time.NewTicker(healthCheckInterval)
+	defer ticker.Stop()
+	for range ticker.C {
 		a.mu.RLock()
 		ps := make([]*Pool, 0, len(a.Pools))
 		for _, p := range a.Pools {
@@ -1023,27 +1025,7 @@ func (a *App) healthLoop() {
 		}
 		a.mu.RUnlock()
 		for _, p := range ps {
-			p.mu.Lock()
-			if p.Status != "up" {
-				p.mu.Unlock()
-				continue
-			}
-			expected := p.ExitIP
-			p.mu.Unlock()
-
-			ip, latency, err := p.probeCurrent()
-			p.mu.Lock()
-			if err != nil || ip != expected {
-				p.FailCount++
-			} else {
-				p.FailCount = 0
-				p.LatencyMS = latency
-			}
-			fails := p.FailCount
-			p.mu.Unlock()
-			if fails >= 2 {
-				go a.switchNext(p, "switching")
-			}
+			go a.checkPoolHealth(p)
 		}
 	}
 }
@@ -1051,6 +1033,7 @@ func (a *App) healthLoop() {
 const switchAttemptWindow = 90 * time.Second
 
 func (a *App) switchNext(p *Pool, phase string) {
+	cancelAutoRetry(p.ID)
 	p.opMu.Lock()
 	defer p.opMu.Unlock()
 
@@ -1069,6 +1052,7 @@ func (a *App) switchNext(p *Pool, phase string) {
 		p.Status = "failed"
 		p.Error = "没有可用候选节点"
 		p.mu.Unlock()
+		a.armAutoRecovery(p)
 		return
 	}
 
@@ -1083,6 +1067,7 @@ func (a *App) switchNext(p *Pool, phase string) {
 		}
 		p.Error = fmt.Sprintf("当前 %d/%d 个候选均处于 5 分钟冷却中，最早约 %s 后可重新尝试；不会重复检测刚失败的节点", cooling, len(cands), cooldownWait(earliest, time.Now()))
 		p.mu.Unlock()
+		a.armAutoRecovery(p)
 		return
 	}
 
@@ -1120,7 +1105,7 @@ func (a *App) switchNext(p *Pool, phase string) {
 	nextPos := state.cursorPosition(len(cands))
 	p.mu.Lock()
 	p.Status = "failed"
-	continuation := fmt.Sprintf("；失败节点冷却 5 分钟；再次点击立即切换将从第 %d/%d 个候选继续", nextPos, len(cands))
+	continuation := fmt.Sprintf("；失败节点冷却 5 分钟；系统将从第 %d/%d 个候选自动继续", nextPos, len(cands))
 	switch {
 	case timedOut || time.Now().After(deadline):
 		if lastErr != nil {
@@ -1140,6 +1125,7 @@ func (a *App) switchNext(p *Pool, phase string) {
 		p.Error = "候选节点均不可用" + continuation
 	}
 	p.mu.Unlock()
+	a.armAutoRecovery(p)
 }
 
 func (a *App) activateNode(p *Pool, node Node, phase string, operationDeadline time.Time) error {
@@ -2050,6 +2036,7 @@ func (a *App) restorePools() {
 			p.Status = "no-candidates"
 			p.Error = "没有可用候选节点"
 			p.mu.Unlock()
+			a.armAutoRecovery(p)
 			continue
 		}
 		go a.switchNext(p, "restoring")
