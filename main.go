@@ -802,13 +802,13 @@ func parseProxioRows(rows []map[string]any) []Node {
 		if !hasReliability && !hasUptime {
 			continue
 		}
-		if hasReliability && reliability < 80 {
+		if hasReliability && reliability < 70 {
 			continue
 		}
-		if hasUptime && uptime < 0.75 {
+		if hasUptime && uptime < 0.60 {
 			continue
 		}
-		if hasLatencyS && (latencyS <= 0 || latencyS > 2.5) {
+		if hasLatencyS && (latencyS <= 0 || latencyS > 5.0) {
 			continue
 		}
 		if anonymity == "transparent" {
@@ -824,7 +824,7 @@ func parseProxioRows(rows []map[string]any) []Node {
 					}
 				}
 			}
-			if total >= 5 && float64(good)/float64(total) < 0.70 {
+			if total >= 5 && float64(good)/float64(total) < 0.60 {
 				continue
 			}
 		}
@@ -1292,50 +1292,103 @@ func (p *Pool) probeCurrent() (string, int, error) {
 }
 
 // probeVPNGate 测的是实际通过 VPN 隧道访问外网的耗时，不再依赖 ICMP ping。
-func probeVPNGate(ns string) (string, int, error) {
-	start := time.Now()
-	out, err := exec.Command("ip", "netns", "exec", ns, "curl", "-4", "-fsS", "--max-time", "8", "https://api.ipify.org").Output()
-	latency := int(time.Since(start).Milliseconds())
-	if err != nil {
-		return "", -1, err
-	}
-	s := strings.TrimSpace(string(out))
-	if net.ParseIP(s) == nil {
-		return "", -1, fmt.Errorf("出口 IP 返回异常: %q", s)
-	}
-	if latency < 1 {
-		latency = 1
-	}
-	return s, latency, nil
+var exitProbeEndpoints = []string{
+	"https://api.ipify.org",
+	"https://checkip.amazonaws.com",
+	"https://icanhazip.com",
 }
 
+func tlsVerificationFailed(text string) bool {
+	v := strings.ToLower(strings.TrimSpace(text))
+	return strings.Contains(v, "x509") ||
+		strings.Contains(v, "certificate has expired") ||
+		strings.Contains(v, "certificate signed by unknown authority") ||
+		strings.Contains(v, "ssl certificate problem") ||
+		strings.Contains(v, "failed to verify certificate")
+}
+
+func parseProbeIP(body []byte) (string, error) {
+	ip := strings.TrimSpace(string(body))
+	parsed := net.ParseIP(ip)
+	if parsed == nil || parsed.To4() == nil {
+		return "", fmt.Errorf("出口 IPv4 返回异常: %q", ip)
+	}
+	return parsed.String(), nil
+}
+
+// probeVPNGate 通过 VPN namespace 依次尝试多个 HTTPS 出口检测点。
+// 任意一个正常返回合法 IPv4 即认为出口可用；TLS 证书验证异常则立即拒绝该节点。
+func probeVPNGate(ns string) (string, int, error) {
+	var errs []string
+	for _, endpoint := range exitProbeEndpoints {
+		start := time.Now()
+		cmd := exec.Command("ip", "netns", "exec", ns, "curl", "-4", "-fsS", "--max-time", "6", endpoint)
+		out, err := cmd.CombinedOutput()
+		latency := int(time.Since(start).Milliseconds())
+		if err != nil {
+			detail := strings.TrimSpace(string(out))
+			if detail == "" {
+				detail = err.Error()
+			}
+			if tlsVerificationFailed(detail) {
+				return "", -1, fmt.Errorf("TLS 证书验证失败: %s", detail)
+			}
+			errs = append(errs, endpoint+": "+detail)
+			continue
+		}
+		ip, parseErr := parseProbeIP(out)
+		if parseErr != nil {
+			errs = append(errs, endpoint+": "+parseErr.Error())
+			continue
+		}
+		if latency < 1 {
+			latency = 1
+		}
+		return ip, latency, nil
+	}
+	return "", -1, fmt.Errorf("所有 HTTPS 出口检测点均失败: %s", strings.Join(errs, " | "))
+}
+
+// probeProxyNode 对公开 SOCKS5 做真实 CONNECT + HTTPS 检测。
+// 多检测点仅用于降低单一检测站不可达造成的误判，不会跳过系统 TLS 验证。
 func probeProxyNode(node Node) (string, int, error) {
 	if net.ParseIP(node.IP) == nil || node.Port < 1 || node.Port > 65535 {
 		return "", -1, errors.New("上游 SOCKS5 地址无效")
 	}
-	client := proxyHTTPClient(node, 10*time.Second)
-	start := time.Now()
-	resp, err := client.Get("https://api.ipify.org")
-	latency := int(time.Since(start).Milliseconds())
-	if err != nil {
-		return "", -1, err
+	var errs []string
+	for _, endpoint := range exitProbeEndpoints {
+		client := proxyHTTPClient(node, 8*time.Second)
+		start := time.Now()
+		resp, err := client.Get(endpoint)
+		latency := int(time.Since(start).Milliseconds())
+		if err != nil {
+			if tlsVerificationFailed(err.Error()) {
+				return "", -1, fmt.Errorf("TLS 证书验证失败: %w", err)
+			}
+			errs = append(errs, endpoint+": "+err.Error())
+			continue
+		}
+		b, readErr := io.ReadAll(io.LimitReader(resp.Body, 128))
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			errs = append(errs, fmt.Sprintf("%s: HTTP %d", endpoint, resp.StatusCode))
+			continue
+		}
+		if readErr != nil {
+			errs = append(errs, endpoint+": "+readErr.Error())
+			continue
+		}
+		ip, parseErr := parseProbeIP(b)
+		if parseErr != nil {
+			errs = append(errs, endpoint+": "+parseErr.Error())
+			continue
+		}
+		if latency < 1 {
+			latency = 1
+		}
+		return ip, latency, nil
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", -1, fmt.Errorf("出口检测 HTTP %d", resp.StatusCode)
-	}
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 128))
-	if err != nil {
-		return "", -1, err
-	}
-	ip := strings.TrimSpace(string(b))
-	if net.ParseIP(ip) == nil {
-		return "", -1, fmt.Errorf("出口 IP 返回异常: %q", ip)
-	}
-	if latency < 1 {
-		latency = 1
-	}
-	return ip, latency, nil
+	return "", -1, fmt.Errorf("所有 HTTPS 出口检测点均失败: %s", strings.Join(errs, " | "))
 }
 
 // measureNodeLatency 测的是面板服务器到上游节点本身的延迟，而不是完整出口 HTTP 请求。
