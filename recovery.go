@@ -26,22 +26,10 @@ func retryEntry(poolID string) *autoRetryEntry {
 	return actual.(*autoRetryEntry)
 }
 
-// scheduleAutoRetry 让已经进入故障状态的出口无人值守继续恢复：
-// 仍有未冷却候选时很快续扫；全部候选都在冷却时等最早一个冷却到期再继续。
-func (a *App) scheduleAutoRetry(p *Pool) time.Duration {
-	p.mu.Lock()
-	cands := append([]Node(nil), p.Candidates...)
-	p.mu.Unlock()
-
-	delay := noCandidateRetryDelay
-	if len(cands) > 0 {
-		now := time.Now()
-		delay = getCandidateScanState(p.ID).nextRetryDelay(cands, now)
-		if delay <= 0 {
-			delay = autoRetryContinueDelay
-		}
+func (a *App) scheduleRetryTimer(p *Pool, delay time.Duration) time.Duration {
+	if delay <= 0 {
+		delay = time.Second
 	}
-
 	e := retryEntry(p.ID)
 	e.mu.Lock()
 	e.seq++
@@ -77,11 +65,26 @@ func (a *App) scheduleAutoRetry(p *Pool) time.Duration {
 	return delay
 }
 
+// scheduleAutoRetry 让已经进入故障状态的出口无人值守继续恢复：
+// 仍有未冷却候选时稍后续扫；全部候选都在 5 分钟冷却中时等最早一个冷却到期。
+func (a *App) scheduleAutoRetry(p *Pool) time.Duration {
+	p.mu.Lock()
+	cands := append([]Node(nil), p.Candidates...)
+	p.mu.Unlock()
+
+	delay := noCandidateRetryDelay
+	if len(cands) > 0 {
+		now := time.Now()
+		delay = getCandidateScanState(p.ID).nextRetryDelay(cands, now)
+		if delay <= 0 {
+			delay = autoRetryContinueDelay
+		}
+	}
+	return a.scheduleRetryTimer(p, delay)
+}
+
 func (a *App) armAutoRecovery(p *Pool) {
 	delay := a.scheduleAutoRetry(p)
-	if delay <= 0 {
-		return
-	}
 	p.mu.Lock()
 	if p.Status != "up" && p.Status != "starting" && p.Status != "restoring" && p.Status != "switching" {
 		note := fmt.Sprintf("系统将在约 %s 后自动继续寻找，无需手动操作", humanRetryDelay(delay))
@@ -90,6 +93,20 @@ func (a *App) armAutoRecovery(p *Pool) {
 				p.Error += "；"
 			}
 			p.Error += note
+		}
+	}
+	p.mu.Unlock()
+}
+
+// armResourceRecovery 用于服务器自身暂时无法 fork/建 socket 等情况。
+// 这不是节点质量失败，所以不推进 5 分钟候选冷却，只留出恢复时间后从原扫描位置继续。
+func (a *App) armResourceRecovery(p *Pool, cause error) {
+	delay := a.scheduleRetryTimer(p, localResourceRetryDelay)
+	p.mu.Lock()
+	if p.Status != "up" && p.Status != "starting" && p.Status != "restoring" && p.Status != "switching" {
+		p.Error = fmt.Sprintf("检测到服务器本机资源暂时不足，本次不处罚候选节点；系统将在约 %s 后从原位置自动重试", humanRetryDelay(delay))
+		if cause != nil {
+			p.Error += fmt.Sprintf("；系统错误：%v", cause)
 		}
 	}
 	p.mu.Unlock()
