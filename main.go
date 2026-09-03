@@ -537,6 +537,9 @@ func (a *App) deletePool(w http.ResponseWriter, r *http.Request) {
 	}
 	dropCandidateScanState(id)
 	dropAutoRetry(id)
+	if a.telegram != nil && a.telegram.isPoolPaused(id) {
+		a.telegram.setPoolPaused(id, false)
+	}
 	writeJSON(w, 200, map[string]string{"ok": "deleted"})
 }
 

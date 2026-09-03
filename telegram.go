@@ -113,7 +113,7 @@ func (t *TelegramManager) saveLocked() error {
 }
 
 func (t *TelegramManager) start() {
-	t.restartPolling()
+	t.restartPolling(true)
 }
 
 func (t *TelegramManager) stop() {
@@ -125,7 +125,7 @@ func (t *TelegramManager) stop() {
 	t.mu.Unlock()
 }
 
-func (t *TelegramManager) restartPolling() {
+func (t *TelegramManager) restartPolling(sendStartup bool) {
 	t.mu.Lock()
 	if t.cancel != nil {
 		t.cancel()
@@ -150,7 +150,9 @@ func (t *TelegramManager) restartPolling() {
 		}
 	}()
 	go t.registerCommands(token)
-	go t.delayedStartupSummary(ctx)
+	if sendStartup {
+		go t.delayedStartupSummary(ctx)
+	}
 	go t.dailySummaryLoop(ctx)
 }
 
@@ -166,7 +168,7 @@ func (t *TelegramManager) delayedStartupSummary(ctx context.Context) {
 }
 
 func (t *TelegramManager) dailySummaryLoop(ctx context.Context) {
-	ticker := time.NewTicker(30 * time.Minute)
+	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 	for {
 		select {
@@ -422,7 +424,6 @@ func (t *TelegramManager) tryBind(token string, m *tgMessage) bool {
 	t.cfg.UserID = m.From.ID
 	t.cfg.ChatID = m.Chat.ID
 	t.cfg.BoundAt = time.Now()
-	t.cfg.Enabled = true
 	t.bindingUntil = time.Time{}
 	if t.cfg.PausedPools == nil {
 		t.cfg.PausedPools = map[string]bool{}
@@ -488,6 +489,10 @@ func (t *TelegramManager) handleCallback(token string, q *tgCallback) {
 				return
 			}
 			v := p.view()
+			if v.Status == "starting" || v.Status == "switching" || v.Status == "restoring" {
+				t.sendTo(token, chatID, "⏳ "+poolDisplay(v)+" 当前正在"+v.Status+"，请等待本轮完成后再操作。", nil)
+				return
+			}
 			t.sendTo(token, chatID, "🔄 正在切换 "+poolDisplay(v)+"…\n固定 S5 地址不会改变。", nil)
 			p.mu.Lock()
 			p.Status = "switching"
@@ -872,6 +877,27 @@ func (t *TelegramManager) notifySwitchSuccess(p *Pool, before PoolView, phase st
 	if after.Status != "up" {
 		return
 	}
+	if after.ExitIP == "" {
+		if ip, err := detectPoolExitIP(p); err == nil {
+			changed := false
+			p.mu.Lock()
+			if p.Status == "up" {
+				changed = p.ExitIP != ip
+				p.ExitIP = ip
+				if changed {
+					p.IPType = ""
+					p.IPISP = ""
+					p.IPASN = ""
+					p.IPRisk = ""
+				}
+			}
+			p.mu.Unlock()
+			if changed {
+				go enrichPoolIPProfile(p, ip)
+			}
+			after = p.view()
+		}
+	}
 	t.mu.RLock()
 	isRecovery := before.Status == "failed" || before.Status == "no-candidates" || before.Status == "restoring"
 	on := t.cfg.Enabled && t.cfg.ChatID != 0 && ((isRecovery && t.cfg.NotifyRecovery) || (!isRecovery && t.cfg.NotifySwitch))
@@ -911,10 +937,13 @@ func (t *TelegramManager) notifySwitchFailure(p *Pool) {
 	if time.Since(t.startedAt) < 20*time.Second {
 		return
 	}
+	v := p.view()
+	if v.Status == "up" {
+		return
+	}
 	if !on || !t.allowNotify("switch-fail:"+p.ID, 2*time.Minute) {
 		return
 	}
-	v := p.view()
 	t.sendBound("❌ "+poolDisplay(v)+" 暂未找到可用出口\n\n"+safeTGText(v.Error, 1200), nil)
 }
 
@@ -1030,7 +1059,7 @@ func (a *App) telegramSave(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
-	t.restartPolling()
+	t.restartPolling(false)
 	writeJSON(w, 200, map[string]any{"ok": true, "bot_username": info.Username, "token_changed": tokenChanged})
 }
 
