@@ -68,6 +68,41 @@ func (s *candidateScanState) attemptOrder(cands []Node, used map[string]bool, no
 	return order, cooling, earliest
 }
 
+// nextRetryDelay 用于无人值守恢复。仍有未冷却候选时立即进入下一轮；
+// 如果所有候选都在 5 分钟冷却中，则等待最早一个候选冷却到期。
+func (s *candidateScanState) nextRetryDelay(cands []Node, now time.Time) time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(cands) == 0 {
+		return 0
+	}
+	if s.failedUntil == nil {
+		s.failedUntil = map[string]time.Time{}
+	}
+	var earliest time.Time
+	for _, n := range cands {
+		key := nodeKey(n)
+		until, cooling := s.failedUntil[key]
+		if !cooling || !now.Before(until) {
+			if cooling {
+				delete(s.failedUntil, key)
+			}
+			return autoRetryContinueDelay
+		}
+		if earliest.IsZero() || until.Before(earliest) {
+			earliest = until
+		}
+	}
+	if earliest.IsZero() {
+		return autoRetryContinueDelay
+	}
+	d := earliest.Sub(now)
+	if d < time.Second {
+		d = time.Second
+	}
+	return d + time.Second
+}
+
 func (s *candidateScanState) recordFailure(index, total int, key string, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
