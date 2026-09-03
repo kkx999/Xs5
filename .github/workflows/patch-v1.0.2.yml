@@ -173,3 +173,5 @@ jobs:
           fi
           git commit -m 'release: Xs5 v1.0.2 automatic failed-exit recovery'
           git push origin HEAD:main
+
+# trigger: v1.0.2
