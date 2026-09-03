@@ -101,3 +101,21 @@ func releaseVPNGateRelaySlot() {
 	default:
 	}
 }
+
+func poolHasVPNRuntime(p *Pool) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.nsActive || p.ovpn != nil || p.ActiveSource == sourceVPNGate
+}
+
+// stopRuntimeSerialized 用于不确定当前 runtime 类型的切换/收尾路径。
+// 只要涉及 VPN Gate 的 netns/OpenVPN，就与 VPN Gate 激活使用同一个全局串行锁。
+func stopRuntimeSerialized(p *Pool) {
+	if poolHasVPNRuntime(p) {
+		vpnGateActivationMu.Lock()
+		p.stopRuntime()
+		vpnGateActivationMu.Unlock()
+		return
+	}
+	p.stopRuntime()
+}
