@@ -22,7 +22,8 @@ jobs:
           set -euo pipefail
           cat .bootstrap/part-* | base64 -d > /tmp/xs5-source.tar.gz
           tar -xzf /tmp/xs5-source.tar.gz -C .
-          rm -rf .bootstrap .github/workflows/bootstrap.yml
+          rm -rf .bootstrap
+          rm -f .github/workflows/release.yml
       - name: Commit source
         shell: bash
         run: |
