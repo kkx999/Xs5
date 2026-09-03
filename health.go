@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"sync"
 	"time"
 )
@@ -57,6 +58,17 @@ func markConnectivityHealthy(p *Pool, id runtimeIdentity, latency int) bool {
 	return true
 }
 
+func resetHealthAfterLocalPressure(p *Pool, id runtimeIdentity) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.Status != "up" || p.ActiveSource != id.source || p.ActiveIP != id.ip || p.ActivePort != id.port {
+		return false
+	}
+	p.FailCount = 0
+	p.Error = ""
+	return true
+}
+
 func setHealthFailCount(p *Pool, id runtimeIdentity, count int) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -88,6 +100,17 @@ func (a *App) checkPoolHealth(p *Pool) {
 			}
 			return
 		}
+
+		// 两个源统一处理：如果失败来自服务器本身资源不足，而不是远端出口，
+		// 本轮健康检查直接放弃且不累计 FailCount，避免资源抖动触发错误切换。
+		if isLocalResourceError(err) || recentLocalResourcePressure(localPressureHealthWindow) {
+			noteLocalResourcePressure()
+			if resetHealthAfterLocalPressure(p, id) {
+				log.Printf("%s/%s health check paused because of local resource pressure: %v", p.CountryCode, p.ID, err)
+			}
+			return
+		}
+
 		lastErr = err
 		if !setHealthFailCount(p, id, attempt) {
 			return
