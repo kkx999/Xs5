@@ -53,6 +53,9 @@ func (a *App) scheduleRetryTimer(p *Pool, delay time.Duration) time.Duration {
 			return
 		}
 
+		if a.telegram != nil && a.telegram.isPoolPaused(p.ID) {
+			return
+		}
 		p.mu.Lock()
 		status := p.Status
 		p.mu.Unlock()
@@ -96,6 +99,9 @@ func (a *App) armAutoRecovery(p *Pool) {
 		}
 	}
 	p.mu.Unlock()
+	if a.telegram != nil {
+		go a.telegram.notifySwitchFailure(p)
+	}
 }
 
 // armResourceRecovery 用于服务器自身暂时无法 fork/建 socket 等情况。
@@ -110,6 +116,9 @@ func (a *App) armResourceRecovery(p *Pool, cause error) {
 		}
 	}
 	p.mu.Unlock()
+	if a.telegram != nil {
+		go a.telegram.notifyResource(p, cause)
+	}
 }
 
 func cancelAutoRetry(poolID string) {

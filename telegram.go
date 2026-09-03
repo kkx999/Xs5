@@ -58,13 +58,14 @@ type TelegramManager struct {
 	bindingUntil time.Time
 	botUsername  string
 	lastDaily    string
+	startedAt    time.Time
 
 	notifyMu sync.Mutex
 	lastSend map[string]time.Time
 }
 
 func newTelegramManager(app *App) *TelegramManager {
-	t := &TelegramManager{app: app, cfg: defaultTelegramConfig(), lastSend: map[string]time.Time{}}
+	t := &TelegramManager{app: app, cfg: defaultTelegramConfig(), lastSend: map[string]time.Time{}, startedAt: time.Now()}
 	_ = t.load()
 	return t
 }
@@ -140,6 +141,14 @@ func (t *TelegramManager) restartPolling() {
 	t.mu.Unlock()
 
 	go t.pollLoop(ctx, token)
+	go func() {
+		info, err := t.validateToken(token)
+		if err == nil {
+			t.mu.Lock()
+			t.botUsername = info.Username
+			t.mu.Unlock()
+		}
+	}()
 	go t.registerCommands(token)
 	go t.delayedStartupSummary(ctx)
 	go t.dailySummaryLoop(ctx)
@@ -170,7 +179,7 @@ func (t *TelegramManager) dailySummaryLoop(ctx context.Context) {
 			if enabled && now.Hour() >= 9 && t.lastDaily != day {
 				t.lastDaily = day
 				t.mu.Unlock()
-				t.sendBound("📊 Xs5 每日运行摘要\n\n" + t.statusText(), nil)
+				t.sendBound("📊 Xs5 每日运行摘要\n\n"+t.statusText(), nil)
 				continue
 			}
 			t.mu.Unlock()
@@ -293,6 +302,7 @@ func (t *TelegramManager) registerCommands(token string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
+	_ = telegramCall(ctx, token, "deleteWebhook", map[string]any{"drop_pending_updates": false}, nil)
 	_ = telegramCall(ctx, token, "setMyCommands", map[string]any{"commands": commands}, nil)
 }
 
@@ -648,7 +658,7 @@ func flagEmoji(cc string) string {
 	if len(cc) != 2 || cc[0] < 'A' || cc[0] > 'Z' || cc[1] < 'A' || cc[1] > 'Z' {
 		return "🌐"
 	}
-	return string([]rune{rune(0x1F1E6 + cc[0] - 'A'), rune(0x1F1E6 + cc[1] - 'A')})
+	return string([]rune{rune(0x1F1E6) + rune(cc[0]-'A'), rune(0x1F1E6) + rune(cc[1]-'A')})
 }
 
 func poolDisplay(v PoolView) string {
@@ -685,7 +695,11 @@ func (t *TelegramManager) statusText() string {
 			b.WriteString(" · ⏸")
 		}
 		b.WriteString("\n")
-		fmt.Fprintf(&b, "来源：%s\n", sourceLabel(v.ActiveSource))
+		if v.ActiveSource == "" {
+			b.WriteString("来源：-\n")
+		} else {
+			fmt.Fprintf(&b, "来源：%s\n", sourceLabel(v.ActiveSource))
+		}
 		if v.ExitIP != "" {
 			fmt.Fprintf(&b, "出口：%s\n", v.ExitIP)
 		} else {
@@ -859,7 +873,7 @@ func (t *TelegramManager) notifySwitchSuccess(p *Pool, before PoolView, phase st
 		return
 	}
 	t.mu.RLock()
-	isRecovery := before.Status != "up"
+	isRecovery := before.Status == "failed" || before.Status == "no-candidates" || before.Status == "restoring"
 	on := t.cfg.Enabled && t.cfg.ChatID != 0 && ((isRecovery && t.cfg.NotifyRecovery) || (!isRecovery && t.cfg.NotifySwitch))
 	t.mu.RUnlock()
 	if !on {
@@ -894,6 +908,9 @@ func (t *TelegramManager) notifySwitchFailure(p *Pool) {
 	t.mu.RLock()
 	on := t.cfg.Enabled && t.cfg.NotifyFailure && t.cfg.ChatID != 0
 	t.mu.RUnlock()
+	if time.Since(t.startedAt) < 20*time.Second {
+		return
+	}
 	if !on || !t.allowNotify("switch-fail:"+p.ID, 2*time.Minute) {
 		return
 	}
@@ -950,9 +967,9 @@ func (a *App) telegramStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
 		"configured": cfg.Token != "", "token_masked": maskTelegramToken(cfg.Token),
 		"bound": cfg.UserID != 0 && cfg.ChatID != 0, "bot_username": botUsername,
-		"binding": !bindingUntil.IsZero() && time.Now().Before(bindingUntil),
+		"binding":         !bindingUntil.IsZero() && time.Now().Before(bindingUntil),
 		"binding_seconds": maxInt64(0, int64(time.Until(bindingUntil).Seconds())),
-		"enabled": cfg.Enabled, "remote_control": cfg.RemoteControl,
+		"enabled":         cfg.Enabled, "remote_control": cfg.RemoteControl,
 		"notify_start": cfg.NotifyStart, "notify_switch": cfg.NotifySwitch,
 		"notify_failure": cfg.NotifyFailure, "notify_recovery": cfg.NotifyRecovery,
 		"notify_resource": cfg.NotifyResource, "notify_refresh": cfg.NotifyRefresh,

@@ -89,6 +89,9 @@ func (a *App) checkPoolHealth(p *Pool) {
 	if !ok {
 		return
 	}
+	if a.telegram != nil && a.telegram.isPoolPaused(p.ID) {
+		return
+	}
 
 	delays := []time.Duration{healthRetryDelayOne, healthRetryDelayTwo}
 	var lastErr error
@@ -136,5 +139,8 @@ func (a *App) checkPoolHealth(p *Pool) {
 	p.mu.Unlock()
 
 	// 不再由健康检查提前杀掉 runtime；切换器负责在合适的时机接管。
+	if a.telegram != nil {
+		go a.telegram.notifyAutoSwitchStart(p, lastErr)
+	}
 	a.switchNext(p, "switching")
 }

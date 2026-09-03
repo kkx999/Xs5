@@ -6,7 +6,7 @@ ROOT_DIR=$(cd "$(dirname "$0")" && pwd)
 DATA_DIR=/var/lib/xs5
 CONF_DIR=/etc/xs5
 LIB_DIR=/usr/local/lib/xs5
-VERSION=1.0.5
+VERSION=1.1.0
 FIRST_SETUP=0
 MIGRATED=0
 

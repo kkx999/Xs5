@@ -7,10 +7,10 @@ import (
 
 func TestCommandName(t *testing.T) {
 	cases := map[string]string{
-		"/status":            "status",
+		"/status":           "status",
 		"/switch@xs5_test":  "switch",
 		" /recovery extra ": "recovery",
-		"hello":              "",
+		"hello":             "",
 	}
 	for in, want := range cases {
 		if got := commandName(in); got != want {

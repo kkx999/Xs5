@@ -28,7 +28,7 @@ import (
 
 const (
 	appName          = "X S5 池"
-	appVersion       = "v1.0.5"
+	appVersion       = "v1.1.0"
 	defaultListen    = ":8898"
 	workDir          = "/var/lib/xs5"
 	vpngateCSV       = "https://www.vpngate.net/api/iphone/"
@@ -180,6 +180,7 @@ type App struct {
 	Password string           `json:"-"`
 	ServerIP string           `json:"-"`
 	sessions map[string]time.Time
+	telegram *TelegramManager
 }
 
 func main() {
@@ -193,6 +194,8 @@ func main() {
 	if err := app.loadPools(); err != nil {
 		log.Printf("load pools: %v", err)
 	}
+	app.telegram = newTelegramManager(app)
+	app.telegram.start()
 	// 节点源属于外部网络依赖，不阻塞 Web 面板启动。刷新完成后再恢复已有出口。
 	go func() {
 		if err := app.refreshSource(sourceAll); err != nil {
@@ -213,6 +216,12 @@ func main() {
 	mux.HandleFunc("/api/pool/switch", app.auth(app.switchPool))
 	mux.HandleFunc("/api/pool/source", app.auth(app.setPoolSource))
 	mux.HandleFunc("/api/refresh", app.auth(app.refreshNow))
+	mux.HandleFunc("/telegram", app.auth(app.telegramPage))
+	mux.HandleFunc("/api/telegram/status", app.auth(app.telegramStatus))
+	mux.HandleFunc("/api/telegram/save", app.auth(app.telegramSave))
+	mux.HandleFunc("/api/telegram/bind", app.auth(app.telegramBind))
+	mux.HandleFunc("/api/telegram/test", app.auth(app.telegramTest))
+	mux.HandleFunc("/api/telegram/unbind", app.auth(app.telegramUnbind))
 	mux.HandleFunc("/", app.auth(app.index))
 
 	listenAddr := strings.TrimSpace(os.Getenv("XS5_LISTEN"))
@@ -261,6 +270,9 @@ func detectPublicIPv4() string {
 }
 
 func (a *App) shutdown() {
+	if a.telegram != nil {
+		a.telegram.stop()
+	}
 	a.mu.RLock()
 	ps := make([]*Pool, 0, len(a.Pools))
 	for _, p := range a.Pools {
@@ -593,6 +605,9 @@ func (a *App) refreshNow(w http.ResponseWriter, r *http.Request) {
 	}
 	selected := normalizeSource(r.FormValue("source"))
 	if err := a.refreshSource(selected); err != nil {
+		if a.telegram != nil {
+			go a.telegram.notifyRefreshFailure(selected, err)
+		}
 		writeJSON(w, 502, map[string]string{"error": err.Error()})
 		return
 	}
@@ -604,6 +619,9 @@ func (a *App) refreshLoop() {
 		time.Sleep(15 * time.Minute)
 		if err := a.refreshSource(sourceAll); err != nil {
 			log.Printf("refresh: %v", err)
+			if a.telegram != nil {
+				go a.telegram.notifyRefreshFailure(sourceAll, err)
+			}
 		}
 	}
 }
@@ -862,7 +880,7 @@ func fetchProxioJSON() (any, string, error) {
 			errs = append(errs, err.Error())
 			continue
 		}
-		req.Header.Set("User-Agent", "Xs5/v1.0.5")
+		req.Header.Set("User-Agent", "Xs5/v1.1.0")
 		req.Header.Set("Accept", "application/json")
 		resp, err := cli.Do(req)
 		if err != nil {
@@ -1039,6 +1057,7 @@ func (a *App) switchNext(p *Pool, phase string) {
 	p.opMu.Lock()
 	defer p.opMu.Unlock()
 
+	before := p.view()
 	p.mu.Lock()
 	cands := append([]Node(nil), p.Candidates...)
 	previousStatus := p.Status
@@ -1097,6 +1116,9 @@ func (a *App) switchNext(p *Pool, phase string) {
 		err := a.activateNode(p, node, phase, deadline)
 		if err == nil {
 			state.recordSuccess(i, len(cands), nodeKey(node))
+			if a.telegram != nil {
+				go a.telegram.notifySwitchSuccess(p, before, phase)
+			}
 			return
 		}
 		lastErr = err
