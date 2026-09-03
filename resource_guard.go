@@ -4,21 +4,24 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 const (
-	localResourceRetryDelay = 30 * time.Second
-	proxioCandidateGap      = 300 * time.Millisecond
-	vpnGateCandidateGap     = 2 * time.Second
-	vpnGateRelayLimit       = 32
-	vpnGateRelayQueueWait   = 5 * time.Second
-	openVPNReapWait         = 3 * time.Second
+	localResourceRetryDelay   = 30 * time.Second
+	localPressureHealthWindow = 20 * time.Second
+	proxioCandidateGap        = 300 * time.Millisecond
+	vpnGateCandidateGap       = 2 * time.Second
+	vpnGateRelayLimit         = 32
+	vpnGateRelayQueueWait     = 5 * time.Second
+	openVPNReapWait           = 3 * time.Second
 )
 
 var (
-	vpnGateActivationMu sync.Mutex
-	vpnGateRelaySlots   = make(chan struct{}, vpnGateRelayLimit)
+	vpnGateActivationMu       sync.Mutex
+	vpnGateRelaySlots         = make(chan struct{}, vpnGateRelayLimit)
+	lastLocalResourcePressure atomic.Int64
 )
 
 // isLocalResourceError 识别的是本机资源/进程创建失败，而不是远端节点质量问题。
@@ -45,6 +48,18 @@ func isLocalResourceError(err error) bool {
 		}
 	}
 	return false
+}
+
+func noteLocalResourcePressure() {
+	lastLocalResourcePressure.Store(time.Now().UnixNano())
+}
+
+func recentLocalResourcePressure(window time.Duration) bool {
+	ns := lastLocalResourcePressure.Load()
+	if ns == 0 {
+		return false
+	}
+	return time.Since(time.Unix(0, ns)) <= window
 }
 
 func candidateRetryGap(node Node) time.Duration {
@@ -75,6 +90,7 @@ func acquireVPNGateRelaySlot() error {
 	case vpnGateRelaySlots <- struct{}{}:
 		return nil
 	case <-t.C:
+		noteLocalResourcePressure()
 		return errors.New("VPN Gate 本机转发进程已达到安全并发上限")
 	}
 }
