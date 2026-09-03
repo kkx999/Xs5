@@ -63,3 +63,26 @@ func TestUsedCandidateIsDeferredWithoutBreakingCursor(t *testing.T) {
 		}
 	}
 }
+
+func TestNextRetryDelayContinuesWhenUntestedCandidatesRemain(t *testing.T) {
+	nodes := testScanNodes()
+	state := &candidateScanState{failedUntil: map[string]time.Time{}}
+	now := time.Unix(4000, 0)
+	state.recordFailure(0, len(nodes), nodeKey(nodes[0]), now)
+	if got := state.nextRetryDelay(nodes, now.Add(time.Second)); got != autoRetryContinueDelay {
+		t.Fatalf("retry delay=%v want=%v", got, autoRetryContinueDelay)
+	}
+}
+
+func TestNextRetryDelayWaitsForEarliestCooldown(t *testing.T) {
+	nodes := testScanNodes()
+	state := &candidateScanState{failedUntil: map[string]time.Time{}}
+	now := time.Unix(5000, 0)
+	for i, n := range nodes {
+		state.recordFailure(i, len(nodes), nodeKey(n), now.Add(time.Duration(i)*time.Second))
+	}
+	got := state.nextRetryDelay(nodes, now.Add(time.Minute))
+	if got < 4*time.Minute || got > 4*time.Minute+2*time.Second {
+		t.Fatalf("retry delay=%v want about 4m", got)
+	}
+}
