@@ -1,0 +1,399 @@
+name: Apply v1.0.1 scan continuation fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/patch-v1.0.1.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache: false
+      - name: Apply patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          main = Path('main.go')
+          s = main.read_text()
+          if 'appVersion       = "v1.0.0"' not in s:
+              raise SystemExit('unexpected main.go version')
+          s = s.replace('appVersion       = "v1.0.0"', 'appVersion       = "v1.0.1"')
+          s = s.replace('Xs5/v1.0.0', 'Xs5/v1.0.1')
+
+          pattern = re.compile(r'func \(a \*App\) switchNext\(p \*Pool, phase string\) \{.*?\n\}\n\nfunc \(a \*App\) activate\(p \*Pool, idx int, phase string, operationDeadline time\.Time\) error \{.*?\n\}\n\nfunc \(a \*App\) activateVPNGate', re.S)
+          replacement = r'''func (a *App) switchNext(p *Pool, phase string) {
+          	p.opMu.Lock()
+          	defer p.opMu.Unlock()
+
+          	p.mu.Lock()
+          	cands := append([]Node(nil), p.Candidates...)
+          	previousStatus := p.Status
+          	if phase == "" {
+          		phase = "switching"
+          	}
+          	p.Status = phase
+          	p.Error = ""
+          	p.mu.Unlock()
+
+          	if len(cands) == 0 {
+          		p.mu.Lock()
+          		p.Status = "failed"
+          		p.Error = "没有可用候选节点"
+          		p.mu.Unlock()
+          		return
+          	}
+
+          	state := getCandidateScanState(p.ID)
+          	order, cooling, earliest := state.attemptOrder(cands, a.usedNodeKeys(p.CountryCode, p.ID), time.Now())
+          	if len(order) == 0 {
+          		p.mu.Lock()
+          		if previousStatus == "up" {
+          			p.Status = "up"
+          		} else {
+          			p.Status = "failed"
+          		}
+          		p.Error = fmt.Sprintf("当前 %d/%d 个候选均处于 5 分钟冷却中，最早约 %s 后可重新尝试；不会重复检测刚失败的节点", cooling, len(cands), cooldownWait(earliest, time.Now()))
+          		p.mu.Unlock()
+          		return
+          	}
+
+          	p.mu.Lock()
+          	p.LatencyMS = -1
+          	p.NodeLatencyMS = -1
+          	p.IPType = ""
+          	p.IPISP = ""
+          	p.IPASN = ""
+          	p.IPRisk = ""
+          	p.mu.Unlock()
+
+          	deadline := time.Now().Add(switchAttemptWindow)
+          	var lastErr error
+          	attempted := 0
+          	timedOut := false
+          	for _, i := range order {
+          		if time.Now().After(deadline) {
+          			timedOut = true
+          			break
+          		}
+          		node := cands[i]
+          		attempted++
+          		if err := a.activateNode(p, node, phase, deadline); err == nil {
+          			state.recordSuccess(i, len(cands), nodeKey(node))
+          			return
+          		} else {
+          			lastErr = err
+          			state.recordFailure(i, len(cands), nodeKey(node), time.Now())
+          			log.Printf("%s/%s candidate %s %s failed (本轮 %d, 候选位置 %d/%d): %v", p.CountryCode, p.ID, sourceLabel(node.Source), node.Host, attempted, i+1, len(cands), err)
+          		}
+          	}
+
+          	p.stopRuntime()
+          	nextPos := state.cursorPosition(len(cands))
+          	p.mu.Lock()
+          	p.Status = "failed"
+          	continuation := fmt.Sprintf("；失败节点冷却 5 分钟；再次点击立即切换将从第 %d/%d 个候选继续", nextPos, len(cands))
+          	switch {
+          	case timedOut || time.Now().After(deadline):
+          		if lastErr != nil {
+          			p.Error = fmt.Sprintf("90 秒内本轮已尝试 %d 个候选（%d 个仍在冷却），仍未找到可用节点%s；最后错误：%v", attempted, cooling, continuation, lastErr)
+          		} else {
+          			p.Error = fmt.Sprintf("90 秒内本轮已尝试 %d 个候选（%d 个仍在冷却），仍未找到可用节点%s", attempted, cooling, continuation)
+          		}
+          	case attempted >= len(order):
+          		if lastErr != nil {
+          			p.Error = fmt.Sprintf("本轮可尝试的 %d 个候选均不可用（另有 %d 个处于冷却）%s；最后错误：%v", attempted, cooling, continuation, lastErr)
+          		} else {
+          			p.Error = fmt.Sprintf("本轮可尝试的 %d 个候选均不可用（另有 %d 个处于冷却）%s", attempted, cooling, continuation)
+          		}
+          	case lastErr != nil:
+          		p.Error = lastErr.Error() + continuation
+          	default:
+          		p.Error = "候选节点均不可用" + continuation
+          	}
+          	p.mu.Unlock()
+          }
+
+          func (a *App) activateNode(p *Pool, node Node, phase string, operationDeadline time.Time) error {
+          	if phase == "" {
+          		phase = "starting"
+          	}
+          	p.mu.Lock()
+          	p.Status = phase
+          	p.Error = ""
+          	p.mu.Unlock()
+
+          	p.stopRuntime()
+          	switch node.Source {
+          	case sourceProxio:
+          		return a.activateProxio(p, node)
+          	default:
+          		return a.activateVPNGate(p, node, operationDeadline)
+          	}
+          }
+
+          func (a *App) activateVPNGate'''
+          s2, n = pattern.subn(replacement, s, count=1)
+          if n != 1:
+              raise SystemExit(f'failed to replace switchNext/activate block: {n}')
+          s = s2
+
+          old = '''\tif p != nil {\n\t\tp.stop()\n\t}\n\twriteJSON(w, 200, map[string]string{"ok": "deleted"})'''
+          new = '''\tif p != nil {\n\t\tp.stop()\n\t}\n\tdropCandidateScanState(id)\n\twriteJSON(w, 200, map[string]string{"ok": "deleted"})'''
+          if old not in s:
+              raise SystemExit('deletePool patch anchor not found')
+          s = s.replace(old, new, 1)
+
+          old = '''\tp.SourceMode = sourceMode\n\tp.Candidates = cands\n\tp.Status = "switching"\n\tp.Error = ""\n\tp.mu.Unlock()\n\tif err := a.savePoolsLocked(); err != nil {'''
+          new = '''\tp.SourceMode = sourceMode\n\tp.Candidates = cands\n\tp.Status = "switching"\n\tp.Error = ""\n\tp.mu.Unlock()\n\tresetCandidateScanState(id)\n\tif err := a.savePoolsLocked(); err != nil {'''
+          if old not in s:
+              raise SystemExit('setPoolSource patch anchor not found')
+          s = s.replace(old, new, 1)
+          main.write_text(s)
+
+          Path('scan_state.go').write_text(r'''package main
+
+import (
+          "fmt"
+          "sync"
+          "time"
+)
+
+const failedCandidateCooldown = 5 * time.Minute
+
+type candidateScanState struct {
+          mu          sync.Mutex
+          cursor      int
+          failedUntil map[string]time.Time
+}
+
+var candidateScanStates sync.Map
+
+func getCandidateScanState(poolID string) *candidateScanState {
+          fresh := &candidateScanState{failedUntil: map[string]time.Time{}}
+          actual, _ := candidateScanStates.LoadOrStore(poolID, fresh)
+          return actual.(*candidateScanState)
+}
+
+func resetCandidateScanState(poolID string) { candidateScanStates.Delete(poolID) }
+func dropCandidateScanState(poolID string)  { candidateScanStates.Delete(poolID) }
+
+// attemptOrder 从上次 cursor 继续扫描。5 分钟内刚失败的节点会被跳过；
+// 同国家其他出口正在使用的上游节点会被后置，但不会永久跳过。
+func (s *candidateScanState) attemptOrder(cands []Node, used map[string]bool, now time.Time) (order []int, cooling int, earliest time.Time) {
+          s.mu.Lock()
+          defer s.mu.Unlock()
+          n := len(cands)
+          if n == 0 {
+                  s.cursor = 0
+                  return nil, 0, time.Time{}
+          }
+          if s.failedUntil == nil {
+                  s.failedUntil = map[string]time.Time{}
+          }
+          if s.cursor < 0 || s.cursor >= n {
+                  s.cursor = 0
+          }
+          for key, until := range s.failedUntil {
+                  if !now.Before(until) {
+                          delete(s.failedUntil, key)
+                  }
+          }
+          deferred := make([]int, 0)
+          order = make([]int, 0, n)
+          for off := 0; off < n; off++ {
+                  i := (s.cursor + off) % n
+                  key := nodeKey(cands[i])
+                  if until, ok := s.failedUntil[key]; ok && now.Before(until) {
+                          cooling++
+                          if earliest.IsZero() || until.Before(earliest) {
+                                  earliest = until
+                          }
+                          continue
+                  }
+                  if used[key] {
+                          deferred = append(deferred, i)
+                  } else {
+                          order = append(order, i)
+                  }
+          }
+          order = append(order, deferred...)
+          return order, cooling, earliest
+}
+
+func (s *candidateScanState) recordFailure(index, total int, key string, now time.Time) {
+          s.mu.Lock()
+          defer s.mu.Unlock()
+          if s.failedUntil == nil {
+                  s.failedUntil = map[string]time.Time{}
+          }
+          if total > 0 {
+                  s.cursor = (index + 1) % total
+          } else {
+                  s.cursor = 0
+          }
+          s.failedUntil[key] = now.Add(failedCandidateCooldown)
+}
+
+func (s *candidateScanState) recordSuccess(index, total int, key string) {
+          s.mu.Lock()
+          defer s.mu.Unlock()
+          if total > 0 {
+                  s.cursor = (index + 1) % total
+          } else {
+                  s.cursor = 0
+          }
+          if s.failedUntil != nil {
+                  delete(s.failedUntil, key)
+          }
+}
+
+func (s *candidateScanState) cursorPosition(total int) int {
+          s.mu.Lock()
+          defer s.mu.Unlock()
+          if total <= 0 {
+                  return 0
+          }
+          if s.cursor < 0 || s.cursor >= total {
+                  s.cursor = 0
+          }
+          return s.cursor + 1
+}
+
+func cooldownWait(until, now time.Time) string {
+          if until.IsZero() || !now.Before(until) {
+                  return "0 秒"
+          }
+          d := until.Sub(now).Round(time.Second)
+          if d < time.Second {
+                  d = time.Second
+          }
+          minutes := int(d / time.Minute)
+          seconds := int((d % time.Minute) / time.Second)
+          if minutes > 0 {
+                  return fmt.Sprintf("%d 分 %d 秒", minutes, seconds)
+          }
+          return fmt.Sprintf("%d 秒", seconds)
+}
+''')
+
+          Path('scan_state_test.go').write_text(r'''package main
+
+import (
+          "testing"
+          "time"
+)
+
+func testScanNodes() []Node {
+          return []Node{
+                  {Source: sourceProxio, IP: "192.0.2.1", Port: 1001, Host: "a"},
+                  {Source: sourceProxio, IP: "192.0.2.2", Port: 1002, Host: "b"},
+                  {Source: sourceProxio, IP: "192.0.2.3", Port: 1003, Host: "c"},
+                  {Source: sourceProxio, IP: "192.0.2.4", Port: 1004, Host: "d"},
+          }
+}
+
+func TestCandidateScanContinuesAndCoolsFailures(t *testing.T) {
+          nodes := testScanNodes()
+          state := &candidateScanState{failedUntil: map[string]time.Time{}}
+          now := time.Unix(1000, 0)
+          order, cooling, _ := state.attemptOrder(nodes, nil, now)
+          if cooling != 0 || len(order) != 4 || order[0] != 0 {
+                  t.Fatalf("initial order=%v cooling=%d", order, cooling)
+          }
+          state.recordFailure(0, len(nodes), nodeKey(nodes[0]), now)
+          state.recordFailure(1, len(nodes), nodeKey(nodes[1]), now.Add(time.Second))
+          order, cooling, _ = state.attemptOrder(nodes, nil, now.Add(2*time.Second))
+          if cooling != 2 || len(order) != 2 || order[0] != 2 || order[1] != 3 {
+                  t.Fatalf("continued order=%v cooling=%d, want [2 3] cooling=2", order, cooling)
+          }
+          if got := state.cursorPosition(len(nodes)); got != 3 {
+                  t.Fatalf("cursor position=%d want 3", got)
+          }
+}
+
+func TestCandidateCooldownExpiresAfterFiveMinutes(t *testing.T) {
+          nodes := testScanNodes()
+          state := &candidateScanState{failedUntil: map[string]time.Time{}}
+          now := time.Unix(2000, 0)
+          state.recordFailure(0, len(nodes), nodeKey(nodes[0]), now)
+          order, cooling, _ := state.attemptOrder(nodes, nil, now.Add(4*time.Minute+59*time.Second))
+          if cooling != 1 || len(order) != 3 {
+                  t.Fatalf("before expiry order=%v cooling=%d", order, cooling)
+          }
+          order, cooling, _ = state.attemptOrder(nodes, nil, now.Add(5*time.Minute+time.Second))
+          if cooling != 0 || len(order) != 4 {
+                  t.Fatalf("after expiry order=%v cooling=%d", order, cooling)
+          }
+}
+
+func TestUsedCandidateIsDeferredWithoutBreakingCursor(t *testing.T) {
+          nodes := testScanNodes()
+          state := &candidateScanState{cursor: 1, failedUntil: map[string]time.Time{}}
+          used := map[string]bool{nodeKey(nodes[1]): true}
+          order, _, _ := state.attemptOrder(nodes, used, time.Unix(3000, 0))
+          want := []int{2, 3, 0, 1}
+          if len(order) != len(want) {
+                  t.Fatalf("order=%v", order)
+          }
+          for i := range want {
+                  if order[i] != want[i] {
+                          t.Fatalf("order=%v want=%v", order, want)
+                  }
+          }
+}
+''')
+
+          Path('VERSION').write_text('1.0.1\n')
+
+          p = Path('install.sh')
+          x = p.read_text()
+          if 'VERSION=1.0.0' not in x:
+              raise SystemExit('install.sh version anchor not found')
+          p.write_text(x.replace('VERSION=1.0.0', 'VERSION=1.0.1', 1))
+
+          p = Path('xs5.sh')
+          x = p.read_text()
+          p.write_text(x.replace('echo "1.0.0"', 'echo "1.0.1"'))
+
+          p = Path('README.md')
+          x = p.read_text().replace('v1.0.0', 'v1.0.1').replace('1.0.0', '1.0.1')
+          marker = '## 环境\n'
+          note = '''## v1.0.1：候选续跑与失败冷却\n\n- 单个出口会记住上一轮扫描位置；90 秒未找到可用节点后，再点“立即切换”会从未扫描的位置继续。\n- 检测失败的候选进入 5 分钟冷却，冷却期间不会重复浪费时间检测。\n- 同国家其他出口正在使用的节点仍会后置，尽量避免多个出口落到同一上游。\n- 切换成功后继续保留下一候选位置，后续手动切换不会立即重复当前节点。\n\n'''
+          if marker not in x:
+              raise SystemExit('README marker not found')
+          if '候选续跑与失败冷却' not in x:
+              x = x.replace(marker, note + marker, 1)
+          p.write_text(x)
+
+          Path('RELEASE.md').write_text('''# Xs5 v1.0.1\n\n本版本修复大量公开代理候选时，90 秒切换窗口结束后再次点击“立即切换”可能重复扫描同一批失败节点的问题。\n\n- 每个 S5 出口保存下一候选扫描位置。\n- 90 秒未找到可用节点时，再次点击会从上一轮未完成的位置继续。\n- 失败候选冷却 5 分钟，冷却期间自动跳过。\n- 冷却全部命中时立即返回，不再空耗 90 秒。\n- 保留同国家多出口的上游避让逻辑。\n- 激活逻辑改为直接使用候选节点对象，降低刷新节点池与切换并发时索引错位风险。\n\n> Xs5 使用第三方公开 VPN / SOCKS5 节点。公开节点可能不稳定、不可信或被目标站封禁，请勿通过不受信任的公共出口传输敏感明文数据。\n''')
+          PY
+
+          gofmt -w main.go scan_state.go scan_state_test.go
+          go test ./...
+          go vet ./...
+
+      - name: Commit v1.0.1
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          rm -f .github/workflows/patch-v1.0.1.yml
+          git add -A
+          git commit -m 'release: Xs5 v1.0.1 scan continuation and 5 minute cooldown'
+          git push origin HEAD:main
