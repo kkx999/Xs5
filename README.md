@@ -1,4 +1,4 @@
-# X S5 池（Xs5）v1.0.1
+# X S5 池（Xs5）v1.0.3
 
 Xs5 是一个面向 Debian 12 VPS 的公开出口聚合与 SOCKS5 管理工具。它按国家维护一个或多个固定 SOCKS5 地址，后台从 VPN Gate / Proxio 拉取候选节点，执行真实出网检查、健康检查和故障切换；上层面板只需要长期使用固定的 `服务器IP:端口`。
 
@@ -14,6 +14,14 @@ Xs5 是一个面向 Debian 12 VPS 的公开出口聚合与 SOCKS5 管理工具�
 - 面板可选择 IP 直连，也可配置域名 HTTPS。
 - HTTPS 支持 80 端口 HTTP-01 或 Cloudflare DNS-01（不占用 80）。
 - S5 配置始终显示服务器公网 IP，不随面板域名变化。
+
+## v1.0.3：动态出口健康检查稳定性修复
+
+- 健康检查不再要求公网出口 IP 与上一次完全一致。
+- VPN Gate / Proxio 只要真实 HTTPS 出网成功并取得合法公网 IPv4，就继续保持当前上游。
+- 公网出口 IP 动态变化时，面板自动更新新 IP，并重新识别 IP 属性、ISP / ASN，不触发切换。
+- 仍保持 30 秒常规检查 + 首次失败 10 秒快速复检；只有连续两次真实出网失败才自动切换。
+- 保留 v1.0.2 的三 HTTPS 检测点、TLS 严格验证、5 分钟失败候选冷却和无人值守续扫。
 
 ## v1.0.1：候选续跑与失败冷却
 
@@ -57,16 +65,16 @@ xs5
 下载与服务器架构对应的文件：
 
 ```text
-xs5-v1.0.1-linux-amd64.tar.gz
-xs5-v1.0.1-linux-arm64.tar.gz
+xs5-v1.0.3-linux-amd64.tar.gz
+xs5-v1.0.3-linux-arm64.tar.gz
 SHA256SUMS
 ```
 
 然后：
 
 ```bash
-tar -xzf xs5-v1.0.1-linux-amd64.tar.gz
-cd xs5-v1.0.1-linux-amd64
+tar -xzf xs5-v1.0.3-linux-amd64.tar.gz
+cd xs5-v1.0.3-linux-amd64
 bash install.sh
 ```
 
@@ -77,7 +85,7 @@ Release 同时提供 GitHub 自动生成的 `Source code (zip)` 和 `Source code
 下载 GitHub Release 中的 `Source code (tar.gz)`，解压后：
 
 ```bash
-cd Xs5-1.0.1
+cd Xs5-1.0.3
 bash install.sh
 ```
 

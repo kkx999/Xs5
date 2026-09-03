@@ -28,7 +28,7 @@ import (
 
 const (
 	appName          = "X S5 池"
-	appVersion       = "v1.0.2"
+	appVersion       = "v1.0.3"
 	defaultListen    = ":8898"
 	workDir          = "/var/lib/xs5"
 	vpngateCSV       = "https://www.vpngate.net/api/iphone/"
@@ -860,7 +860,7 @@ func fetchProxioJSON() (any, string, error) {
 			errs = append(errs, err.Error())
 			continue
 		}
-		req.Header.Set("User-Agent", "Xs5/v1.0.2")
+		req.Header.Set("User-Agent", "Xs5/v1.0.3")
 		req.Header.Set("Accept", "application/json")
 		resp, err := cli.Do(req)
 		if err != nil {
