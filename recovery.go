@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
@@ -103,8 +104,7 @@ func humanRetryDelay(d time.Duration) string {
 	m := int(d / time.Minute)
 	s := int((d % time.Minute) / time.Second)
 	if m > 0 {
-		return time.Duration(m)*time.Minute.String() // replaced below by tests? keep explicit formatter in next lines
+		return fmt.Sprintf("%d 分 %d 秒", m, s)
 	}
-	_ = s
-	return d.String()
+	return fmt.Sprintf("%d 秒", s)
 }
