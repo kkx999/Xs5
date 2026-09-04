@@ -24,20 +24,21 @@ const (
 )
 
 type telegramConfig struct {
-	Token          string          `json:"token"`
-	UserID         int64           `json:"user_id,omitempty"`
-	ChatID         int64           `json:"chat_id,omitempty"`
-	Enabled        bool            `json:"enabled"`
-	RemoteControl  bool            `json:"remote_control"`
-	NotifyStart    bool            `json:"notify_start"`
-	NotifySwitch   bool            `json:"notify_switch"`
-	NotifyFailure  bool            `json:"notify_failure"`
-	NotifyRecovery bool            `json:"notify_recovery"`
-	NotifyResource bool            `json:"notify_resource"`
-	NotifyRefresh  bool            `json:"notify_refresh"`
-	DailySummary   bool            `json:"daily_summary"`
-	BoundAt        time.Time       `json:"bound_at,omitempty"`
-	PausedPools    map[string]bool `json:"paused_pools,omitempty"`
+	Token           string           `json:"token"`
+	UserID          int64            `json:"user_id,omitempty"`
+	ChatID          int64            `json:"chat_id,omitempty"`
+	Enabled         bool             `json:"enabled"`
+	RemoteControl   bool             `json:"remote_control"`
+	NotifyStart     bool             `json:"notify_start"`
+	NotifySwitch    bool             `json:"notify_switch"`
+	NotifyFailure   bool             `json:"notify_failure"`
+	NotifyRecovery  bool             `json:"notify_recovery"`
+	NotifyResource  bool             `json:"notify_resource"`
+	NotifyRefresh   bool             `json:"notify_refresh"`
+	DailySummary    bool             `json:"daily_summary"`
+	BoundAt         time.Time        `json:"bound_at,omitempty"`
+	PausedPools     map[string]bool  `json:"paused_pools,omitempty"`
+	FailureMessages map[string]int64 `json:"failure_messages,omitempty"`
 }
 
 func defaultTelegramConfig() telegramConfig {
@@ -45,7 +46,7 @@ func defaultTelegramConfig() telegramConfig {
 		Enabled: true, RemoteControl: true,
 		NotifyStart: true, NotifySwitch: true, NotifyFailure: true,
 		NotifyRecovery: true, NotifyResource: true, NotifyRefresh: true,
-		PausedPools: map[string]bool{},
+		PausedPools: map[string]bool{}, FailureMessages: map[string]int64{},
 	}
 }
 
@@ -85,6 +86,9 @@ func (t *TelegramManager) load() error {
 	if cfg.PausedPools == nil {
 		cfg.PausedPools = map[string]bool{}
 	}
+	if cfg.FailureMessages == nil {
+		cfg.FailureMessages = map[string]int64{}
+	}
 	t.mu.Lock()
 	t.cfg = cfg
 	t.mu.Unlock()
@@ -94,6 +98,9 @@ func (t *TelegramManager) load() error {
 func (t *TelegramManager) saveLocked() error {
 	if t.cfg.PausedPools == nil {
 		t.cfg.PausedPools = map[string]bool{}
+	}
+	if t.cfg.FailureMessages == nil {
+		t.cfg.FailureMessages = map[string]int64{}
 	}
 	if err := os.MkdirAll(filepath.Dir(telegramConfigPath), 0700); err != nil {
 		return err
@@ -689,9 +696,9 @@ func (t *TelegramManager) sendPoolMenu(token string, chatID int64, title, prefix
 	t.sendTo(token, chatID, title, tgMarkup{InlineKeyboard: rows})
 }
 
-func (t *TelegramManager) sendTo(token string, chatID int64, text string, markup any) {
+func (t *TelegramManager) sendToMessageID(token string, chatID int64, text string, markup any) (int64, error) {
 	if chatID == 0 || strings.TrimSpace(token) == "" {
-		return
+		return 0, errors.New("Telegram 未绑定")
 	}
 	payload := map[string]any{"chat_id": chatID, "text": safeTGText(text, 3900), "disable_web_page_preview": true}
 	if markup != nil {
@@ -699,7 +706,17 @@ func (t *TelegramManager) sendTo(token string, chatID int64, text string, markup
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
-	_ = telegramCall(ctx, token, "sendMessage", payload, nil)
+	var sent struct {
+		MessageID int64 `json:"message_id"`
+	}
+	if err := telegramCall(ctx, token, "sendMessage", payload, &sent); err != nil {
+		return 0, err
+	}
+	return sent.MessageID, nil
+}
+
+func (t *TelegramManager) sendTo(token string, chatID int64, text string, markup any) {
+	_, _ = t.sendToMessageID(token, chatID, text, markup)
 }
 
 func (t *TelegramManager) sendBound(text string, markup any) {
@@ -711,6 +728,75 @@ func (t *TelegramManager) sendBound(text string, markup any) {
 		return
 	}
 	t.sendTo(token, chatID, text, markup)
+}
+
+func failureMessageKey(poolID string) string {
+	return "switch-fail:" + poolID
+}
+
+func (t *TelegramManager) deleteMessage(token string, chatID, messageID int64) bool {
+	if strings.TrimSpace(token) == "" || chatID == 0 || messageID == 0 {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return telegramCall(ctx, token, "deleteMessage", map[string]any{
+		"chat_id": chatID, "message_id": messageID,
+	}, nil) == nil
+}
+
+// replaceFailureMessage sends the new failure first, then removes the previous
+// message for the same pool. This avoids losing the last known failure if a new
+// Telegram send itself fails.
+func (t *TelegramManager) replaceFailureMessage(poolID, text string) {
+	key := failureMessageKey(poolID)
+	t.mu.RLock()
+	token, chatID := t.cfg.Token, t.cfg.ChatID
+	enabled := t.cfg.Enabled
+	t.mu.RUnlock()
+	if !enabled || token == "" || chatID == 0 {
+		return
+	}
+	newID, err := t.sendToMessageID(token, chatID, text, nil)
+	if err != nil || newID == 0 {
+		return
+	}
+
+	t.mu.Lock()
+	if t.cfg.FailureMessages == nil {
+		t.cfg.FailureMessages = map[string]int64{}
+	}
+	oldID := t.cfg.FailureMessages[key]
+	t.cfg.FailureMessages[key] = newID
+	_ = t.saveLocked()
+	t.mu.Unlock()
+
+	if oldID != 0 && oldID != newID {
+		_ = t.deleteMessage(token, chatID, oldID)
+	}
+}
+
+// clearFailureMessage removes the retained failure notification after this pool
+// has recovered. If Telegram temporarily refuses deletion, keep the ID so a
+// later recovery can retry instead of forgetting the stale message.
+func (t *TelegramManager) clearFailureMessage(poolID string) {
+	key := failureMessageKey(poolID)
+	t.mu.RLock()
+	token, chatID := t.cfg.Token, t.cfg.ChatID
+	messageID := t.cfg.FailureMessages[key]
+	t.mu.RUnlock()
+	if messageID == 0 {
+		return
+	}
+	if !t.deleteMessage(token, chatID, messageID) {
+		return
+	}
+	t.mu.Lock()
+	if t.cfg.FailureMessages[key] == messageID {
+		delete(t.cfg.FailureMessages, key)
+		_ = t.saveLocked()
+	}
+	t.mu.Unlock()
 }
 
 func safeTGText(s string, max int) string {
@@ -927,7 +1013,13 @@ func (t *TelegramManager) notifyAutoSwitchStart(p *Pool, cause error) {
 }
 
 func (t *TelegramManager) notifySwitchSuccess(p *Pool, before PoolView, phase string) {
-	if t == nil || p == nil || phase == "restoring" {
+	if t == nil || p == nil {
+		return
+	}
+	if phase == "restoring" {
+		if p.view().Status == "up" {
+			t.clearFailureMessage(p.ID)
+		}
 		return
 	}
 	for i := 0; i < 12; i++ {
@@ -941,6 +1033,7 @@ func (t *TelegramManager) notifySwitchSuccess(p *Pool, before PoolView, phase st
 	if after.Status != "up" {
 		return
 	}
+	t.clearFailureMessage(p.ID)
 	if after.ExitIP == "" {
 		if ip, err := detectPoolExitIP(p); err == nil {
 			changed := false
@@ -1008,7 +1101,7 @@ func (t *TelegramManager) notifySwitchFailure(p *Pool) {
 	if !on || !t.allowNotify("switch-fail:"+p.ID, 2*time.Minute) {
 		return
 	}
-	t.sendBound("❌ "+poolDisplay(v)+" 暂未找到可用出口\n\n"+safeTGText(v.Error, 1200), nil)
+	t.replaceFailureMessage(p.ID, "❌ "+poolDisplay(v)+" 暂未找到可用出口\n\n"+safeTGText(v.Error, 1200))
 }
 
 func (t *TelegramManager) notifyResource(p *Pool, cause error) {
@@ -1104,6 +1197,7 @@ func (a *App) telegramSave(w http.ResponseWriter, r *http.Request) {
 		t.cfg.UserID = 0
 		t.cfg.ChatID = 0
 		t.cfg.BoundAt = time.Time{}
+		t.cfg.FailureMessages = map[string]int64{}
 		t.bindingUntil = time.Time{}
 	}
 	t.cfg.Token = token
@@ -1147,6 +1241,7 @@ func (a *App) telegramBind(w http.ResponseWriter, r *http.Request) {
 		t.cfg.UserID = 0
 		t.cfg.ChatID = 0
 		t.cfg.BoundAt = time.Time{}
+		t.cfg.FailureMessages = map[string]int64{}
 	}
 	if t.cfg.UserID != 0 || t.cfg.ChatID != 0 {
 		t.mu.Unlock()
@@ -1195,6 +1290,7 @@ func (a *App) telegramUnbind(w http.ResponseWriter, r *http.Request) {
 	t.cfg.UserID = 0
 	t.cfg.ChatID = 0
 	t.cfg.BoundAt = time.Time{}
+	t.cfg.FailureMessages = map[string]int64{}
 	t.bindingUntil = time.Time{}
 	err := t.saveLocked()
 	t.mu.Unlock()
