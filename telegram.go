@@ -392,9 +392,10 @@ func (t *TelegramManager) handleMessage(token string, m *tgMessage) {
 	case "check":
 		t.sendPoolMenu(token, m.Chat.ID, "选择要手动检测的出口：", "ck:", false)
 	case "refresh":
-		t.sendTo(token, m.Chat.ID, "选择要刷新的节点源：", tgMarkup{InlineKeyboard: [][]tgButton{{
-			{Text: "VPN Gate", CallbackData: "rf:vpngate"}, {Text: "Proxio", CallbackData: "rf:proxio"}, {Text: "全部来源", CallbackData: "rf:all"},
-		}}})
+		t.sendTo(token, m.Chat.ID, "选择要刷新的节点源：", tgMarkup{InlineKeyboard: [][]tgButton{
+			{{Text: "VPN Gate", CallbackData: "rf:vpngate"}, {Text: "Proxio", CallbackData: "rf:proxio"}},
+			{{Text: "ProxyScrape", CallbackData: "rf:proxyscrape_free"}, {Text: "全部来源", CallbackData: "rf:all"}},
+		}})
 	case "recovery":
 		t.sendTo(token, m.Chat.ID, t.recoveryText(), t.mainMenu())
 	case "pause":
@@ -529,11 +530,16 @@ func (t *TelegramManager) handleCallback(token string, q *tgCallback) {
 			source := normalizeSource(strings.TrimPrefix(data, "rf:"))
 			t.sendTo(token, chatID, "🌐 正在刷新 "+sourceLabel(source)+" 节点池…", nil)
 			go func() {
+				if source == sourceAll {
+					t.sendTo(token, chatID, t.refreshAllSourcesText(), nil)
+					return
+				}
 				if err := t.app.refreshSource(source); err != nil {
 					t.sendTo(token, chatID, "❌ "+sourceLabel(source)+" 刷新失败\n"+safeTGText(err.Error(), 900), nil)
 					return
 				}
-				t.sendTo(token, chatID, "✅ "+sourceLabel(source)+" 节点池刷新完成。", nil)
+				count := t.sourceNodeCount(source)
+				t.sendTo(token, chatID, fmt.Sprintf("✅ %s 节点池刷新完成：%d 个候选。", sourceLabel(source), count), nil)
 			}()
 			return
 		}
@@ -572,6 +578,63 @@ func (t *TelegramManager) handleCallback(token string, q *tgCallback) {
 			t.sendTo(token, chatID, "▶️ 已恢复 "+poolDisplay(v)+" 的自动健康切换。", nil)
 		}
 	}
+}
+
+func (t *TelegramManager) sourceNodeCount(source string) int {
+	t.app.mu.RLock()
+	defer t.app.mu.RUnlock()
+	count := 0
+	for _, n := range t.app.Nodes {
+		if n.Source == source {
+			count++
+		}
+	}
+	return count
+}
+
+func (t *TelegramManager) refreshAllSourcesText() string {
+	sources := []string{sourceVPNGate, sourceProxio, sourceProxyScrape}
+	type refreshResult struct {
+		source string
+		count  int
+		err    error
+	}
+	ch := make(chan refreshResult, len(sources))
+	for _, source := range sources {
+		go func(s string) {
+			err := t.app.refreshSource(s)
+			count := 0
+			if err == nil {
+				count = t.sourceNodeCount(s)
+			}
+			ch <- refreshResult{source: s, count: count, err: err}
+		}(source)
+	}
+	results := map[string]refreshResult{}
+	for range sources {
+		r := <-ch
+		results[r.source] = r
+	}
+
+	okCount := 0
+	lines := make([]string, 0, len(sources))
+	for _, source := range sources {
+		r := results[source]
+		if r.err != nil {
+			lines = append(lines, "❌ "+sourceLabel(source)+"："+safeTGText(r.err.Error(), 260))
+			continue
+		}
+		okCount++
+		lines = append(lines, fmt.Sprintf("✅ %s：%d 个候选", sourceLabel(source), r.count))
+	}
+
+	title := "✅ 全部来源节点池刷新完成"
+	if okCount == 0 {
+		title = "❌ 全部来源节点池刷新失败"
+	} else if okCount != len(sources) {
+		title = "⚠️ 全部来源节点池部分完成"
+	}
+	return title + "\n\n" + strings.Join(lines, "\n")
 }
 
 func (t *TelegramManager) answerCallback(token, id string) {

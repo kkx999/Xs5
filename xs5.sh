@@ -19,7 +19,7 @@ RAW_INSTALL="https://raw.githubusercontent.com/kkx999/Xs5/main/install-latest.sh
 mkdir -p "$CONF_DIR" "$DATA_DIR"
 chmod 700 "$CONF_DIR" "$DATA_DIR"
 
-version(){ cat "$VERSION_FILE" 2>/dev/null || echo "1.2.0"; }
+version(){ cat "$VERSION_FILE" 2>/dev/null || echo "1.2.1"; }
 public_ip(){
   local ip
   ip=$(curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)

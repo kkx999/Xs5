@@ -18,10 +18,13 @@ const (
 	proxyScrapeJSON    = "https://cdn.jsdelivr.net/gh/ProxyScrape/free-proxy-list@main/proxies/protocols/socks5/data.json"
 	proxyScrapeRawJSON = "https://raw.githubusercontent.com/ProxyScrape/free-proxy-list/main/proxies/protocols/socks5/data.json"
 
-	proxyScrapeCountryLimit = 30
-	proxyScrapeMinUptimePct = 60.0
-	proxyScrapeMaxLatencyMS = 5000.0
-	proxyScrapeMaxCheckAge  = 6 * time.Hour
+	proxyScrapeCountryLimit       = 30
+	proxyScrapeCountryTarget      = 10
+	proxyScrapePreferredUptimePct = 60.0
+	proxyScrapeFallbackUptimePct  = 40.0
+	proxyScrapeFloorUptimePct     = 25.0
+	proxyScrapeMaxLatencyMS       = 5000.0
+	proxyScrapeMaxCheckAge        = 6 * time.Hour
 )
 
 type proxyScrapeEntry struct {
@@ -45,7 +48,7 @@ func fetchProxyScrapeNodes() ([]Node, error) {
 	}
 	nodes := parseProxyScrapeEntries(entries, time.Now())
 	if len(nodes) == 0 {
-		return nil, fmt.Errorf("ProxyScrape 节点经过轻筛选后为空（%s）", endpoint)
+		return nil, fmt.Errorf("ProxyScrape 节点经过自适应轻筛选后为空（最低在线率 %.0f%%，%s）", proxyScrapeFloorUptimePct, endpoint)
 	}
 	return nodes, nil
 }
@@ -110,7 +113,8 @@ func parseProxyScrapeEntries(entries []proxyScrapeEntry, now time.Time) []Node {
 		if len(cc) != 2 {
 			continue
 		}
-		if e.UptimePercent < proxyScrapeMinUptimePct {
+		// 只在元数据层做轻筛选；25% 是兜底下限，不代表节点已被 Xs5 验证可用。
+		if e.UptimePercent < proxyScrapeFloorUptimePct {
 			continue
 		}
 		if e.LatencyMS <= 0 || e.LatencyMS > proxyScrapeMaxLatencyMS {
@@ -147,14 +151,55 @@ func parseProxyScrapeEntries(entries []proxyScrapeEntry, now time.Time) []Node {
 
 	out := make([]Node, 0)
 	for _, cc := range countries {
-		nodes := byCountry[cc]
-		sortCandidateQuality(nodes, now)
-		if len(nodes) > proxyScrapeCountryLimit {
-			nodes = nodes[:proxyScrapeCountryLimit]
-		}
+		nodes := selectProxyScrapeCountry(byCountry[cc], now)
 		out = append(out, nodes...)
 	}
 	return out
+}
+
+// selectProxyScrapeCountry 先保留所有 >=60% 的高质量候选（最多 30 个）。
+// 只有高质量候选不足 10 个时，才依次放宽到 >=40% 和 >=25%，并且只补到 10 个。
+// 这避免固定 60% 门槛把整个源筛空，也避免低质量节点大量灌入候选池。
+func selectProxyScrapeCountry(nodes []Node, now time.Time) []Node {
+	if len(nodes) == 0 {
+		return nil
+	}
+	sortCandidateQuality(nodes, now)
+	selected := make([]Node, 0, minInt(proxyScrapeCountryLimit, len(nodes)))
+	seen := map[string]bool{}
+	addTier := func(minUptimePct float64, target int) {
+		for _, n := range nodes {
+			if len(selected) >= target || len(selected) >= proxyScrapeCountryLimit {
+				return
+			}
+			if n.Uptime*100+0.0001 < minUptimePct {
+				continue
+			}
+			key := socksEndpointKey(n)
+			if key == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			selected = append(selected, n)
+		}
+	}
+
+	// 第一层不刻意凑满，只收当前确实达到 60% 的节点，最多 30 个。
+	addTier(proxyScrapePreferredUptimePct, proxyScrapeCountryLimit)
+	if len(selected) < proxyScrapeCountryTarget {
+		addTier(proxyScrapeFallbackUptimePct, proxyScrapeCountryTarget)
+	}
+	if len(selected) < proxyScrapeCountryTarget {
+		addTier(proxyScrapeFloorUptimePct, proxyScrapeCountryTarget)
+	}
+	return selected
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func sortStrings(v []string) {
