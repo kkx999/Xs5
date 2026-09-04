@@ -28,7 +28,7 @@ import (
 
 const (
 	appName          = "X S5 池"
-	appVersion       = "v1.2.1"
+	appVersion       = "v1.3.0"
 	defaultListen    = ":8898"
 	workDir          = "/var/lib/xs5"
 	vpngateCSV       = "https://www.vpngate.net/api/iphone/"
@@ -1090,7 +1090,7 @@ func (a *App) switchNext(p *Pool, phase string) {
 		} else {
 			p.Status = "failed"
 		}
-		p.Error = fmt.Sprintf("当前 %d/%d 个候选均处于 5 分钟冷却中，最早约 %s 后可重新尝试；不会重复检测刚失败的节点", cooling, len(cands), cooldownWait(earliest, time.Now()))
+		p.Error = fmt.Sprintf("当前 %d/%d 个候选均处于失败冷却中，最早约 %s 后可重新尝试；不会重复检测刚失败的节点", cooling, len(cands), cooldownWait(earliest, time.Now()))
 		p.mu.Unlock()
 		a.armAutoRecovery(p)
 		return
@@ -1117,10 +1117,15 @@ func (a *App) switchNext(p *Pool, phase string) {
 		}
 		node := cands[i]
 		attempted++
+		if attempted == 1 {
+			adaptiveEndRuntime(p.ID, time.Now(), false)
+		}
 		err := a.activateNode(p, node, phase, deadline)
 		if err == nil {
 			state.recordSuccess(i, len(cands), nodeKey(node))
-			recordVerifiedCandidate(node, p.view().LatencyMS)
+			latency := p.view().LatencyMS
+			recordVerifiedCandidate(node, latency)
+			adaptiveRecordCandidateSuccess(p.ID, node, latency, time.Now())
 			if a.telegram != nil {
 				go a.telegram.notifySwitchSuccess(p, before, phase)
 			}
@@ -1133,8 +1138,9 @@ func (a *App) switchNext(p *Pool, phase string) {
 			log.Printf("%s/%s candidate %s %s paused by local resource pressure (候选不进入冷却): %v", p.CountryCode, p.ID, sourceLabel(node.Source), node.Host, err)
 			break
 		}
-		state.recordFailure(i, len(cands), nodeKey(node), time.Now())
-		log.Printf("%s/%s candidate %s %s failed (本轮 %d, 候选位置 %d/%d): %v", p.CountryCode, p.ID, sourceLabel(node.Source), node.Host, attempted, i+1, len(cands), err)
+		cooldown := adaptiveRecordCandidateFailure(node, err, time.Now())
+		state.recordFailureWithCooldown(i, len(cands), nodeKey(node), time.Now(), cooldown)
+		log.Printf("%s/%s candidate %s %s failed (本轮 %d, 候选位置 %d/%d, 冷却 %s): %v", p.CountryCode, p.ID, sourceLabel(node.Source), node.Host, attempted, i+1, len(cands), humanRetryDelay(cooldown), err)
 		if !waitCandidateGap(node, deadline) {
 			timedOut = true
 			break
@@ -1155,7 +1161,7 @@ func (a *App) switchNext(p *Pool, phase string) {
 	nextPos := state.cursorPosition(len(cands))
 	p.mu.Lock()
 	p.Status = "failed"
-	continuation := fmt.Sprintf("；失败节点冷却 5 分钟；系统将从第 %d/%d 个候选自动继续", nextPos, len(cands))
+	continuation := fmt.Sprintf("；失败节点按失败类型动态冷却；系统将从第 %d/%d 个候选自动继续", nextPos, len(cands))
 	switch {
 	case timedOut || time.Now().After(deadline):
 		if lastErr != nil {
@@ -1576,14 +1582,19 @@ func enrichPoolIPProfile(p *Pool, ip string) {
 		log.Printf("IP 属性检测 %s 失败: %v", ip, err)
 		return
 	}
+	matched := false
 	p.mu.Lock()
 	if p.ExitIP == ip { // 防止慢查询把已经切换后的新出口覆盖掉
 		p.IPType = prof.Type
 		p.IPISP = prof.ISP
 		p.IPASN = prof.ASN
 		p.IPRisk = prof.Risk
+		matched = true
 	}
 	p.mu.Unlock()
+	if matched {
+		adaptiveRecordExitProfile(p.ID, ip, prof.Type, prof.ISP, prof.ASN, prof.Risk, time.Now())
+	}
 }
 
 // lookupIPProfile 使用 ip-api 的公开查询字段识别 hosting/mobile/proxy，失败时退回 ipwho.is 获取 ASN/ISP，

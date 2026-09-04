@@ -42,15 +42,15 @@ type adaptiveNodeRecord struct {
 }
 
 type adaptiveSourceRecord struct {
-	CountryCode    string    `json:"country_code"`
-	Source         string    `json:"source"`
-	Attempts       int       `json:"attempts"`
-	Successes      int       `json:"successes"`
-	Failures       int       `json:"failures"`
-	Drops          int       `json:"drops"`
-	RuntimeSeconds int64     `json:"runtime_seconds,omitempty"`
-	RuntimeSessions int      `json:"runtime_sessions,omitempty"`
-	LastUpdated    time.Time `json:"last_updated,omitempty"`
+	CountryCode     string    `json:"country_code"`
+	Source          string    `json:"source"`
+	Attempts        int       `json:"attempts"`
+	Successes       int       `json:"successes"`
+	Failures        int       `json:"failures"`
+	Drops           int       `json:"drops"`
+	RuntimeSeconds  int64     `json:"runtime_seconds,omitempty"`
+	RuntimeSessions int       `json:"runtime_sessions,omitempty"`
+	LastUpdated     time.Time `json:"last_updated,omitempty"`
 }
 
 type adaptiveQualityFile struct {
@@ -281,6 +281,7 @@ func (s *adaptiveQualityStore) recordSuccess(poolID string, n Node, latency int,
 	rec := s.nodes[key]
 	rec.CountryCode = strings.ToUpper(n.CountryCode)
 	rec.Source = normalizeSource(n.Source)
+	rec.Attempts++
 	rec.Successes++
 	rec.ConsecutiveSuccess++
 	rec.ConsecutiveFailures = 0
@@ -294,6 +295,7 @@ func (s *adaptiveQualityStore) recordSuccess(poolID string, n Node, latency int,
 	sr := s.sources[sk]
 	sr.CountryCode = rec.CountryCode
 	sr.Source = rec.Source
+	sr.Attempts++
 	sr.Successes++
 	sr.LastUpdated = now
 	s.sources[sk] = sr
@@ -372,6 +374,7 @@ func (s *adaptiveQualityStore) recordFailure(n Node, err error, now time.Time) t
 	rec := s.nodes[key]
 	rec.CountryCode = strings.ToUpper(n.CountryCode)
 	rec.Source = normalizeSource(n.Source)
+	rec.Attempts++
 	rec.Failures++
 	rec.ConsecutiveFailures++
 	rec.ConsecutiveSuccess = 0
@@ -381,6 +384,7 @@ func (s *adaptiveQualityStore) recordFailure(n Node, err error, now time.Time) t
 	sr := s.sources[sk]
 	sr.CountryCode = rec.CountryCode
 	sr.Source = rec.Source
+	sr.Attempts++
 	sr.Failures++
 	sr.LastUpdated = now
 	s.sources[sk] = sr
@@ -405,7 +409,7 @@ func (s *adaptiveQualityStore) recordRuntimeHealthy(poolID string, id runtimeIde
 			if rec.Source != normalizeSource(id.source) {
 				continue
 			}
-			if strings.Contains(key, "|"+id.ip+"|") || strings.Contains(key, "|"+id.ip+":" ) {
+			if strings.Contains(key, "|"+id.ip+"|") || strings.Contains(key, "|"+id.ip+":") {
 				session = adaptiveRuntimeSession{NodeKey: key, CountryCode: rec.CountryCode, Source: rec.Source, StartedAt: now}
 				s.runtimes[poolID] = session
 				ok = true

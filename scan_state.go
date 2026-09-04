@@ -104,6 +104,10 @@ func (s *candidateScanState) nextRetryDelay(cands []Node, now time.Time) time.Du
 }
 
 func (s *candidateScanState) recordFailure(index, total int, key string, now time.Time) {
+	s.recordFailureWithCooldown(index, total, key, now, failedCandidateCooldown)
+}
+
+func (s *candidateScanState) recordFailureWithCooldown(index, total int, key string, now time.Time, cooldown time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.failedUntil == nil {
@@ -114,7 +118,10 @@ func (s *candidateScanState) recordFailure(index, total int, key string, now tim
 	} else {
 		s.cursor = 0
 	}
-	s.failedUntil[key] = now.Add(failedCandidateCooldown)
+	if cooldown <= 0 {
+		cooldown = failedCandidateCooldown
+	}
+	s.failedUntil[key] = now.Add(cooldown)
 }
 
 func (s *candidateScanState) recordSuccess(index, total int, key string) {

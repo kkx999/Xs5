@@ -181,6 +181,11 @@ func sortCandidateQuality(nodes []Node, now time.Time) {
 		if ri != rj {
 			return ri > rj
 		}
+		ai := adaptiveCandidateScore(nodes[i], now)
+		aj := adaptiveCandidateScore(nodes[j], now)
+		if ai != aj {
+			return ai > aj
+		}
 		if nodes[i].SourceHits != nodes[j].SourceHits {
 			return nodes[i].SourceHits > nodes[j].SourceHits
 		}
@@ -308,7 +313,7 @@ func buildCandidatePool(all []Node, country, sourceMode string, now time.Time) [
 	}
 
 	// VPN Gate 默认优先，但交错 SOCKS5 备用源，避免多个重型 OpenVPN 失败耗尽整轮 90 秒窗口。
-	pattern := []string{sourceVPNGate, sourceProxio, sourceVPNGate, sourceProxyScrape}
+	pattern := adaptiveSourcePattern(country, now)
 	positions := map[string]int{}
 	total := len(buckets[sourceVPNGate]) + len(buckets[sourceProxio]) + len(buckets[sourceProxyScrape])
 	out := make([]Node, 0, total)

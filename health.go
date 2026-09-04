@@ -100,6 +100,7 @@ func (a *App) checkPoolHealth(p *Pool) {
 		if err == nil {
 			if markConnectivityHealthy(p, id, latency) {
 				recordVerifiedRuntime(id, latency)
+				adaptiveRecordRuntimeHealthy(p.ID, id, latency, time.Now())
 				maybeRefreshPoolExitIP(p, false)
 			}
 			return
@@ -134,6 +135,7 @@ func (a *App) checkPoolHealth(p *Pool) {
 		p.mu.Unlock()
 		return
 	}
+	adaptiveRecordRuntimeDrop(p.ID, id, lastErr, time.Now())
 	p.FailCount = healthFailureLimit
 	p.Status = "failed"
 	p.Error = fmt.Sprintf("固定 S5 完整链路连续 %d 次无法访问普通 HTTPS，正在自动切换：%v", healthFailureLimit, lastErr)
