@@ -1,0 +1,91 @@
+name: Prepare Xs5 v1.3.0
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/prepare-v1.3.0.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache: false
+      - name: Apply v1.3.0 adaptive quality hooks
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace(path, old, new):
+              p=Path(path); s=p.read_text()
+              if old not in s:
+                  raise SystemExit(f'pattern not found in {path}: {old[:120]!r}')
+              p.write_text(s.replace(old,new,1))
+
+          # Candidate ordering: recent verified success remains strongest; adaptive history is conservative tie-breaker.
+          replace('candidate_quality.go', '''\t\tif ri != rj {\n\t\t\treturn ri > rj\n\t\t}\n\t\tif nodes[i].SourceHits != nodes[j].SourceHits {''', '''\t\tif ri != rj {\n\t\t\treturn ri > rj\n\t\t}\n\t\tai := adaptiveCandidateScore(nodes[i], now)\n\t\taj := adaptiveCandidateScore(nodes[j], now)\n\t\tif ai != aj {\n\t\t\treturn ai > aj\n\t\t}\n\t\tif nodes[i].SourceHits != nodes[j].SourceHits {''')
+          replace('candidate_quality.go', '''\tpattern := []string{sourceVPNGate, sourceProxio, sourceVPNGate, sourceProxyScrape}''', '''\tpattern := adaptiveSourcePattern(country, now)''')
+
+          # Dynamic cooldown while keeping 5m as the safe default for callers/tests.
+          replace('scan_state.go', '''func (s *candidateScanState) recordFailure(index, total int, key string, now time.Time) {\n\ts.mu.Lock()\n\tdefer s.mu.Unlock()\n\tif s.failedUntil == nil {\n\t\ts.failedUntil = map[string]time.Time{}\n\t}\n\tif total > 0 {\n\t\ts.cursor = (index + 1) % total\n\t} else {\n\t\ts.cursor = 0\n\t}\n\ts.failedUntil[key] = now.Add(failedCandidateCooldown)\n}''', '''func (s *candidateScanState) recordFailure(index, total int, key string, now time.Time) {\n\ts.recordFailureWithCooldown(index, total, key, now, failedCandidateCooldown)\n}\n\nfunc (s *candidateScanState) recordFailureWithCooldown(index, total int, key string, now time.Time, cooldown time.Duration) {\n\ts.mu.Lock()\n\tdefer s.mu.Unlock()\n\tif s.failedUntil == nil {\n\t\ts.failedUntil = map[string]time.Time{}\n\t}\n\tif total > 0 {\n\t\ts.cursor = (index + 1) % total\n\t} else {\n\t\ts.cursor = 0\n\t}\n\tif cooldown <= 0 {\n\t\tcooldown = failedCandidateCooldown\n\t}\n\ts.failedUntil[key] = now.Add(cooldown)\n}''')
+
+          # Runtime health contributes data only; it never creates extra probes.
+          replace('health.go', '''\t\t\tif markConnectivityHealthy(p, id, latency) {\n\t\t\t\trecordVerifiedRuntime(id, latency)\n\t\t\t\tmaybeRefreshPoolExitIP(p, false)''', '''\t\t\tif markConnectivityHealthy(p, id, latency) {\n\t\t\t\trecordVerifiedRuntime(id, latency)\n\t\t\t\tadaptiveRecordRuntimeHealthy(p.ID, id, latency, time.Now())\n\t\t\t\tmaybeRefreshPoolExitIP(p, false)''')
+          replace('health.go', '''\tp.FailCount = healthFailureLimit\n\tp.Status = "failed"''', '''\tadaptiveRecordRuntimeDrop(p.ID, id, lastErr, time.Now())\n\tp.FailCount = healthFailureLimit\n\tp.Status = "failed"''')
+
+          # Switching learns only from attempts that actually succeed/fail. Local resource pressure is excluded.
+          replace('main.go', '''\t\tnode := cands[i]\n\t\tattempted++\n\t\terr := a.activateNode(p, node, phase, deadline)\n\t\tif err == nil {\n\t\t\tstate.recordSuccess(i, len(cands), nodeKey(node))\n\t\t\trecordVerifiedCandidate(node, p.view().LatencyMS)''', '''\t\tnode := cands[i]\n\t\tattempted++\n\t\tif attempted == 1 {\n\t\t\tadaptiveEndRuntime(p.ID, time.Now(), false)\n\t\t}\n\t\terr := a.activateNode(p, node, phase, deadline)\n\t\tif err == nil {\n\t\t\tstate.recordSuccess(i, len(cands), nodeKey(node))\n\t\t\tlatency := p.view().LatencyMS\n\t\t\trecordVerifiedCandidate(node, latency)\n\t\t\tadaptiveRecordCandidateSuccess(p.ID, node, latency, time.Now())''')
+          replace('main.go', '''\t\tstate.recordFailure(i, len(cands), nodeKey(node), time.Now())\n\t\tlog.Printf("%s/%s candidate %s %s failed (本轮 %d, 候选位置 %d/%d): %v", p.CountryCode, p.ID, sourceLabel(node.Source), node.Host, attempted, i+1, len(cands), err)''', '''\t\tcooldown := adaptiveRecordCandidateFailure(node, err, time.Now())\n\t\tstate.recordFailureWithCooldown(i, len(cands), nodeKey(node), time.Now(), cooldown)\n\t\tlog.Printf("%s/%s candidate %s %s failed (本轮 %d, 候选位置 %d/%d, 冷却 %s): %v", p.CountryCode, p.ID, sourceLabel(node.Source), node.Host, attempted, i+1, len(cands), humanRetryDelay(cooldown), err)''')
+          replace('main.go', '''当前 %d/%d 个候选均处于 5 分钟冷却中''', '''当前 %d/%d 个候选均处于失败冷却中''')
+          replace('main.go', '''；失败节点冷却 5 分钟；系统将从第 %d/%d 个候选自动继续''', '''；失败节点按失败类型动态冷却；系统将从第 %d/%d 个候选自动继续''')
+
+          # Record exit profile only after the async lookup still matches the active exit.
+          replace('main.go', '''\tp.mu.Lock()\n\tif p.ExitIP == ip { // 防止慢查询把已经切换后的新出口覆盖掉\n\t\tp.IPType = prof.Type\n\t\tp.IPISP = prof.ISP\n\t\tp.IPASN = prof.ASN\n\t\tp.IPRisk = prof.Risk\n\t}\n\tp.mu.Unlock()''', '''\tmatched := false\n\tp.mu.Lock()\n\tif p.ExitIP == ip { // 防止慢查询把已经切换后的新出口覆盖掉\n\t\tp.IPType = prof.Type\n\t\tp.IPISP = prof.ISP\n\t\tp.IPASN = prof.ASN\n\t\tp.IPRisk = prof.Risk\n\t\tmatched = true\n\t}\n\tp.mu.Unlock()\n\tif matched {\n\t\tadaptiveRecordExitProfile(p.ID, ip, prof.Type, prof.ISP, prof.ASN, prof.Risk, time.Now())\n\t}''')
+
+          # Successful/failed attempts own the denominator; local host pressure never counts as a node attempt.
+          replace('adaptive_quality.go', '''\trec.Successes++\n\trec.ConsecutiveSuccess++''', '''\trec.Attempts++\n\trec.Successes++\n\trec.ConsecutiveSuccess++''')
+          replace('adaptive_quality.go', '''\tsr.CountryCode = rec.CountryCode\n\tsr.Source = rec.Source\n\tsr.Successes++''', '''\tsr.CountryCode = rec.CountryCode\n\tsr.Source = rec.Source\n\tsr.Attempts++\n\tsr.Successes++''')
+          replace('adaptive_quality.go', '''\trec.Failures++\n\trec.ConsecutiveFailures++''', '''\trec.Attempts++\n\trec.Failures++\n\trec.ConsecutiveFailures++''')
+          replace('adaptive_quality.go', '''\tsr.CountryCode = rec.CountryCode\n\tsr.Source = rec.Source\n\tsr.Failures++''', '''\tsr.CountryCode = rec.CountryCode\n\tsr.Source = rec.Source\n\tsr.Attempts++\n\tsr.Failures++''')
+
+          # Version metadata.
+          replace('main.go', 'appVersion       = "v1.2.1"', 'appVersion       = "v1.3.0"')
+          Path('VERSION').write_text('1.3.0\n')
+          replace('install.sh', 'VERSION=1.2.1', 'VERSION=1.3.0')
+          replace('xs5.sh', 'echo "1.2.1"', 'echo "1.3.0"')
+
+          Path('RELEASE.md').write_text('''# Xs5 v1.3.0\n\n本版本在不增加全池主动扫描的前提下，为 VPN Gate / Proxio 增加基于真实运行结果的保守自学习质量模型。当前线路正常时不会为了评分更高而主动切换，VPN Gate 仍保持默认第一优先。\n\n- 记录节点真实尝试次数、成功/失败、连续成功/失败、最近成功/失败和完整链路平均延迟；小样本不会被当成绝对高质量。\n- 记录真实在线会话时长、平均/最长稳定时间与异常掉线次数，长期稳定节点在真正需要切换时获得有限加权。\n- 候选失败改为分类动态冷却：普通首次失败仍从 5 分钟开始，连续失败逐步退避并封顶 30 分钟；TLS/协议/明确拒绝等硬失败处罚略重；服务器本机资源压力仍不处罚节点。\n- 按“国家 + 来源”累计真实成功数据。只有 VPN Gate 与 Proxio 在同一国家都至少获得 12 次真实样本，且 Proxio 明显领先时，才轻微增加 Proxio 的尝试比例；VPN Gate 始终保留第一候选槽位。\n- 记录实际出口 IP、IP 类型、ISP、ASN 与风险标签，并只给予住宅/ISP 属性很小的加分；可用性、稳定性和真实成功率始终优先。\n- 继续保留 v1.2.x 的近期已验证节点缓存、多源去重、90 秒扫描窗口、失败后无人值守恢复、本机资源保护和 Telegram 控制。\n- 不新增候选池后台 TCP/SOCKS5/HTTPS 扫描；所有学习数据仅来自本来就会发生的真实切换、当前线路健康检查和出口属性刷新。\n- 自学习数据保存在 `/var/lib/xs5/adaptive_quality.json`，只影响最近 7 天的排序判断，30 天未活动记录自动淘汰。数据不足或文件不存在时自动回退到 v1.2.1 的原有排序。\n- 从旧版本更新不会改变已有 S5 端口、用户名、密码、国家、来源选择和 Telegram 配置。\n\n> Xs5 使用第三方公开 VPN / SOCKS5 节点。公开节点可能不稳定、不可信或被目标站封禁，请勿通过不受信任的公共出口传输敏感明文数据。\n''')
+          PY
+      - name: Format and test
+        run: |
+          gofmt -w adaptive_quality.go adaptive_quality_test.go candidate_quality.go scan_state.go health.go main.go
+          go test ./...
+          go vet ./...
+      - name: Safety guards
+        run: |
+          set -euo pipefail
+          grep -q 'appVersion       = "v1.3.0"' main.go
+          grep -q '^1.3.0$' VERSION
+          grep -q 'adaptiveSourcePattern(country, now)' candidate_quality.go
+          grep -q 'recordFailureWithCooldown' main.go
+          grep -q 'adaptiveRecordRuntimeHealthy' health.go
+          grep -q 'adaptiveRecordExitProfile' main.go
+          ! grep -q 'v1.3.0' README.md
+      - name: Remove temporary workflow
+        run: rm -f .github/workflows/prepare-v1.3.0.yml
+      - name: Commit v1.3.0
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'release: Xs5 v1.3.0 adaptive quality learning'
+          git push
