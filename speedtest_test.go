@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"math"
 	"testing"
@@ -36,6 +37,21 @@ func TestGeneratedUploadReaderStreamsExactLimit(t *testing.T) {
 func TestSpeedTestCooldownIsTenSeconds(t *testing.T) {
 	if speedTestCooldown != 10*time.Second {
 		t.Fatalf("cooldown=%s want 10s", speedTestCooldown)
+	}
+}
+
+func TestSpeedTestTimeLimitReachedDistinguishesDeadlineFromCancel(t *testing.T) {
+	deadlineCtx, deadlineCancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer deadlineCancel()
+	<-deadlineCtx.Done()
+	if !speedTestTimeLimitReached(deadlineCtx) {
+		t.Fatal("deadline expiration must be treated as the normal speed-test time limit")
+	}
+
+	cancelCtx, cancelOnly := context.WithCancel(context.Background())
+	cancelOnly()
+	if speedTestTimeLimitReached(cancelCtx) {
+		t.Fatal("plain context cancellation must not be treated as the speed-test time limit")
 	}
 }
 
