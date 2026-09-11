@@ -44,7 +44,7 @@ func TestApplySpeedTestViewRequiresSameRuntime(t *testing.T) {
 	runtime := runtimeIdentity{source: sourceVPNGate, ip: "198.51.100.10", port: 443}
 	result := SpeedTestResult{
 		PoolID: id,
-		Mbps: 88.8, MBps: 11.1, Bytes: 5_000_000, DurationMS: 450,
+		Mbps:   88.8, MBps: 11.1, Bytes: 5_000_000, DurationMS: 450,
 		UploadMbps: 40, UploadMBps: 5, UploadBytes: 4_000_000, UploadDurationMS: 800,
 		TestedAt: time.Now(),
 	}

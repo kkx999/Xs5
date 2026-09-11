@@ -28,7 +28,7 @@ import (
 
 const (
 	appName          = "X S5 池"
-	appVersion       = "v1.3.3"
+	appVersion       = "v1.3.4"
 	defaultListen    = ":8898"
 	workDir          = "/var/lib/xs5"
 	vpngateCSV       = "https://www.vpngate.net/api/iphone/"
@@ -144,32 +144,36 @@ type Pool struct {
 }
 
 type PoolView struct {
-	ID              string    `json:"id"`
-	Ordinal         int       `json:"ordinal"`
-	CountryCode     string    `json:"country_code"`
-	Country         string    `json:"country"`
-	SourceMode      string    `json:"source_mode"`
-	Port            int       `json:"port"`
-	User            string    `json:"user"`
-	Pass            string    `json:"pass"`
-	ActiveSource    string    `json:"active_source"`
-	ExitIP          string    `json:"exit_ip"`
-	LatencyMS       int       `json:"latency_ms"`
-	NodeLatencyMS   int       `json:"node_latency_ms"`
-	SpeedMbps       float64   `json:"speed_mbps,omitempty"`
-	SpeedMBps       float64   `json:"speed_mb_per_sec,omitempty"`
-	SpeedBytes      int64     `json:"speed_bytes,omitempty"`
-	SpeedDurationMS int64     `json:"speed_duration_ms,omitempty"`
-	SpeedTestedAt   time.Time `json:"speed_tested_at,omitempty"`
-	IPType          string    `json:"ip_type,omitempty"`
-	IPISP           string    `json:"ip_isp,omitempty"`
-	IPASN           string    `json:"ip_asn,omitempty"`
-	IPRisk          string    `json:"ip_risk,omitempty"`
-	Status          string    `json:"status"`
-	LastSwitch      time.Time `json:"last_switch"`
-	FailCount       int       `json:"fail_count"`
-	Error           string    `json:"error,omitempty"`
-	CandidateCount  int       `json:"candidate_count"`
+	ID                    string    `json:"id"`
+	Ordinal               int       `json:"ordinal"`
+	CountryCode           string    `json:"country_code"`
+	Country               string    `json:"country"`
+	SourceMode            string    `json:"source_mode"`
+	Port                  int       `json:"port"`
+	User                  string    `json:"user"`
+	Pass                  string    `json:"pass"`
+	ActiveSource          string    `json:"active_source"`
+	ExitIP                string    `json:"exit_ip"`
+	LatencyMS             int       `json:"latency_ms"`
+	NodeLatencyMS         int       `json:"node_latency_ms"`
+	SpeedMbps             float64   `json:"speed_mbps,omitempty"`
+	SpeedMBps             float64   `json:"speed_mb_per_sec,omitempty"`
+	SpeedBytes            int64     `json:"speed_bytes,omitempty"`
+	SpeedDurationMS       int64     `json:"speed_duration_ms,omitempty"`
+	UploadSpeedMbps       float64   `json:"upload_speed_mbps,omitempty"`
+	UploadSpeedMBps       float64   `json:"upload_speed_mb_per_sec,omitempty"`
+	UploadSpeedBytes      int64     `json:"upload_speed_bytes,omitempty"`
+	UploadSpeedDurationMS int64     `json:"upload_speed_duration_ms,omitempty"`
+	SpeedTestedAt         time.Time `json:"speed_tested_at,omitempty"`
+	IPType                string    `json:"ip_type,omitempty"`
+	IPISP                 string    `json:"ip_isp,omitempty"`
+	IPASN                 string    `json:"ip_asn,omitempty"`
+	IPRisk                string    `json:"ip_risk,omitempty"`
+	Status                string    `json:"status"`
+	LastSwitch            time.Time `json:"last_switch"`
+	FailCount             int       `json:"fail_count"`
+	Error                 string    `json:"error,omitempty"`
+	CandidateCount        int       `json:"candidate_count"`
 }
 
 func (p *Pool) view() PoolView {
