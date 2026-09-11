@@ -95,6 +95,10 @@ func calculateSpeedRates(bytes int64, d time.Duration) (float64, float64) {
 	return mbps, mbPerSec
 }
 
+func speedTestTimeLimitReached(ctx context.Context) bool {
+	return errors.Is(ctx.Err(), context.DeadlineExceeded)
+}
+
 func speedTestRunning(poolID string) bool {
 	_, ok := speedTestsInFlight.Load(poolID)
 	return ok
@@ -174,7 +178,7 @@ func applySpeedTestView(poolID, status string, runtime runtimeIdentity, v *PoolV
 }
 
 func runDownloadSpeedTest(p *Pool) (int64, time.Duration, error) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), speedTestMaxDuration)
 	defer cancel()
 	client := localPoolHTTPClient(p, speedTestHTTPTimeout)
 	url := fmt.Sprintf("%s&cb=%d", speedTestDownloadURL, time.Now().UnixNano())
@@ -195,14 +199,12 @@ func runDownloadSpeedTest(p *Pool) (int64, time.Duration, error) {
 	}
 
 	started := time.Now()
-	timer := time.AfterFunc(speedTestMaxDuration, cancel)
 	buf := make([]byte, 64*1024)
 	transferred, readErr := io.CopyBuffer(io.Discard, io.LimitReader(resp.Body, speedTestMaxBytes), buf)
 	elapsed := time.Since(started)
-	timer.Stop()
 	_ = resp.Body.Close()
 
-	timedStop := ctx.Err() != nil && elapsed >= speedTestMaxDuration-300*time.Millisecond
+	timedStop := speedTestTimeLimitReached(ctx)
 	if readErr != nil && !timedStop {
 		return 0, 0, fmt.Errorf("下载测速中断: %w", readErr)
 	}
@@ -216,7 +218,7 @@ func runDownloadSpeedTest(p *Pool) (int64, time.Duration, error) {
 }
 
 func runUploadSpeedTest(p *Pool) (int64, time.Duration, error) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), speedTestMaxDuration)
 	defer cancel()
 	client := localPoolHTTPClient(p, speedTestHTTPTimeout)
 	body := newGeneratedUploadReader(speedTestMaxBytes)
@@ -228,16 +230,14 @@ func runUploadSpeedTest(p *Pool) (int64, time.Duration, error) {
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("Cache-Control", "no-cache")
 
-	timer := time.AfterFunc(speedTestMaxDuration, cancel)
 	resp, requestErr := client.Do(req)
-	timer.Stop()
 	transferred, started := body.snapshot()
 	elapsed := time.Duration(0)
 	if !started.IsZero() {
 		elapsed = time.Since(started)
 	}
 
-	timedStop := ctx.Err() != nil && elapsed >= speedTestMaxDuration-300*time.Millisecond
+	timedStop := speedTestTimeLimitReached(ctx)
 	if requestErr != nil && !timedStop {
 		return 0, 0, fmt.Errorf("上传测速中断: %w", requestErr)
 	}
