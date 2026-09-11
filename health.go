@@ -92,6 +92,9 @@ func (a *App) checkPoolHealth(p *Pool) {
 	if a.telegram != nil && a.telegram.isPoolPaused(p.ID) {
 		return
 	}
+	if speedTestRunning(p.ID) {
+		return
+	}
 
 	delays := []time.Duration{healthRetryDelayOne, healthRetryDelayTwo}
 	var lastErr error

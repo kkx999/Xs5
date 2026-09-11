@@ -302,6 +302,7 @@ func (t *TelegramManager) registerCommands(token string) {
 		{"command": "status", "description": "查看全部出口状态"},
 		{"command": "switch", "description": "立即切换指定出口"},
 		{"command": "check", "description": "手动检测指定出口"},
+		{"command": "speed", "description": "测速当前出口"},
 		{"command": "refresh", "description": "刷新节点池"},
 		{"command": "recovery", "description": "查看自动恢复状态"},
 		{"command": "pause", "description": "暂停指定出口自动切换"},
@@ -398,6 +399,8 @@ func (t *TelegramManager) handleMessage(token string, m *tgMessage) {
 		t.sendPoolMenu(token, m.Chat.ID, "选择要立即切换的出口：", "sw:", false)
 	case "check":
 		t.sendPoolMenu(token, m.Chat.ID, "选择要手动检测的出口：", "ck:", false)
+	case "speed":
+		t.sendPoolMenu(token, m.Chat.ID, "选择要测速的当前出口：", "st:", false)
 	case "refresh":
 		t.sendTo(token, m.Chat.ID, "选择要刷新的节点源：", tgMarkup{InlineKeyboard: [][]tgButton{
 			{{Text: "VPN Gate", CallbackData: "rf:vpngate"}, {Text: "Proxio", CallbackData: "rf:proxio"}},
@@ -446,8 +449,9 @@ func (t *TelegramManager) tryBind(token string, m *tgMessage) bool {
 func (t *TelegramManager) mainMenu() tgMarkup {
 	return tgMarkup{InlineKeyboard: [][]tgButton{
 		{{Text: "📊 运行状态", CallbackData: "m:status"}, {Text: "🔄 立即切换", CallbackData: "m:switch"}},
-		{{Text: "🩺 健康检测", CallbackData: "m:check"}, {Text: "🌐 刷新节点池", CallbackData: "m:refresh"}},
-		{{Text: "♻️ 恢复状态", CallbackData: "m:recovery"}, {Text: "⏸ 暂停 / 恢复", CallbackData: "m:pause"}},
+		{{Text: "🩺 健康检测", CallbackData: "m:check"}, {Text: "🚀 出口测速", CallbackData: "m:speed"}},
+		{{Text: "🌐 刷新节点池", CallbackData: "m:refresh"}, {Text: "♻️ 恢复状态", CallbackData: "m:recovery"}},
+		{{Text: "⏸ 暂停 / 恢复", CallbackData: "m:pause"}},
 	}}
 }
 
@@ -470,6 +474,8 @@ func (t *TelegramManager) handleCallback(token string, q *tgCallback) {
 		t.sendPoolMenu(token, chatID, "选择要立即切换的出口：", "sw:", false)
 	case "m:check":
 		t.sendPoolMenu(token, chatID, "选择要手动检测的出口：", "ck:", false)
+	case "m:speed":
+		t.sendPoolMenu(token, chatID, "选择要测速的当前出口：", "st:", false)
 	case "m:refresh":
 		t.sendTo(token, chatID, "选择要刷新的节点源：", tgMarkup{InlineKeyboard: [][]tgButton{
 			{{Text: "VPN Gate", CallbackData: "rf:vpngate"}, {Text: "Proxio", CallbackData: "rf:proxio"}},
@@ -526,6 +532,31 @@ func (t *TelegramManager) handleCallback(token string, q *tgCallback) {
 					return
 				}
 				t.sendTo(token, chatID, fmt.Sprintf("✅ %s 完整 S5 链路正常\n响应耗时：%d ms", poolDisplay(v), latency), nil)
+			}()
+			return
+		}
+		if strings.HasPrefix(data, "st:") {
+			id := strings.TrimPrefix(data, "st:")
+			p := t.pool(id)
+			if p == nil {
+				t.sendTo(token, chatID, "出口不存在。", nil)
+				return
+			}
+			v := p.view()
+			if v.Status != "up" {
+				t.sendTo(token, chatID, "当前出口未处于正常状态，无法测速。", nil)
+				return
+			}
+			t.sendTo(token, chatID, "🚀 正在测速 "+poolDisplay(v)+"…\n最长约 8 秒，测试流量最多约 50 MB。", nil)
+			go func() {
+				result, err := runPoolSpeedTest(p)
+				if err != nil {
+					t.sendTo(token, chatID, "❌ "+poolDisplay(v)+" 测速失败\n"+safeTGText(err.Error(), 900), nil)
+					return
+				}
+				after := p.view()
+				msg := fmt.Sprintf("🚀 %s 测速完成\n\n出口：%s\n下载：%.1f Mbps\n      %.2f MB/s\n测试流量：%.1f MB\n耗时：%.2f 秒", poolDisplay(after), telegramExitLabel(after), result.Mbps, result.MBps, float64(result.Bytes)/1_000_000, float64(result.DurationMS)/1000)
+				t.sendTo(token, chatID, msg, nil)
 			}()
 			return
 		}
@@ -957,6 +988,7 @@ func (t *TelegramManager) helpText() string {
 		"/status  查看全部出口状态\n" +
 		"/switch  立即切换指定出口\n" +
 		"/check  手动检测指定出口，不触发切换\n" +
+		"/speed  测速当前出口的实际下载吞吐\n" +
 		"/refresh  刷新 VPN Gate / Proxio / ProxyScrape 节点池\n" +
 		"/recovery  查看故障、冷却和恢复状态\n" +
 		"/pause  暂停指定出口自动切换\n" +

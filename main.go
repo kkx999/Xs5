@@ -28,7 +28,7 @@ import (
 
 const (
 	appName          = "X S5 池"
-	appVersion       = "v1.3.2"
+	appVersion       = "v1.3.3"
 	defaultListen    = ":8898"
 	workDir          = "/var/lib/xs5"
 	vpngateCSV       = "https://www.vpngate.net/api/iphone/"
@@ -144,38 +144,45 @@ type Pool struct {
 }
 
 type PoolView struct {
-	ID             string    `json:"id"`
-	Ordinal        int       `json:"ordinal"`
-	CountryCode    string    `json:"country_code"`
-	Country        string    `json:"country"`
-	SourceMode     string    `json:"source_mode"`
-	Port           int       `json:"port"`
-	User           string    `json:"user"`
-	Pass           string    `json:"pass"`
-	ActiveSource   string    `json:"active_source"`
-	ExitIP         string    `json:"exit_ip"`
-	LatencyMS      int       `json:"latency_ms"`
-	NodeLatencyMS  int       `json:"node_latency_ms"`
-	IPType         string    `json:"ip_type,omitempty"`
-	IPISP          string    `json:"ip_isp,omitempty"`
-	IPASN          string    `json:"ip_asn,omitempty"`
-	IPRisk         string    `json:"ip_risk,omitempty"`
-	Status         string    `json:"status"`
-	LastSwitch     time.Time `json:"last_switch"`
-	FailCount      int       `json:"fail_count"`
-	Error          string    `json:"error,omitempty"`
-	CandidateCount int       `json:"candidate_count"`
+	ID              string    `json:"id"`
+	Ordinal         int       `json:"ordinal"`
+	CountryCode     string    `json:"country_code"`
+	Country         string    `json:"country"`
+	SourceMode      string    `json:"source_mode"`
+	Port            int       `json:"port"`
+	User            string    `json:"user"`
+	Pass            string    `json:"pass"`
+	ActiveSource    string    `json:"active_source"`
+	ExitIP          string    `json:"exit_ip"`
+	LatencyMS       int       `json:"latency_ms"`
+	NodeLatencyMS   int       `json:"node_latency_ms"`
+	SpeedMbps       float64   `json:"speed_mbps,omitempty"`
+	SpeedMBps       float64   `json:"speed_mb_per_sec,omitempty"`
+	SpeedBytes      int64     `json:"speed_bytes,omitempty"`
+	SpeedDurationMS int64     `json:"speed_duration_ms,omitempty"`
+	SpeedTestedAt   time.Time `json:"speed_tested_at,omitempty"`
+	IPType          string    `json:"ip_type,omitempty"`
+	IPISP           string    `json:"ip_isp,omitempty"`
+	IPASN           string    `json:"ip_asn,omitempty"`
+	IPRisk          string    `json:"ip_risk,omitempty"`
+	Status          string    `json:"status"`
+	LastSwitch      time.Time `json:"last_switch"`
+	FailCount       int       `json:"fail_count"`
+	Error           string    `json:"error,omitempty"`
+	CandidateCount  int       `json:"candidate_count"`
 }
 
 func (p *Pool) view() PoolView {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return PoolView{
+	v := PoolView{
 		ID: p.ID, Ordinal: p.Ordinal, CountryCode: p.CountryCode, Country: p.Country, SourceMode: normalizeSource(p.SourceMode),
 		Port: p.Port, User: p.User, Pass: p.Pass, ActiveSource: p.ActiveSource,
 		ExitIP: p.ExitIP, LatencyMS: p.LatencyMS, NodeLatencyMS: p.NodeLatencyMS, IPType: p.IPType, IPISP: p.IPISP, IPASN: p.IPASN, IPRisk: p.IPRisk, Status: p.Status, LastSwitch: p.LastSwitch,
 		FailCount: p.FailCount, Error: p.Error, CandidateCount: len(p.Candidates),
 	}
+	applySpeedTestView(p.ID, p.Status, runtimeIdentity{source: p.ActiveSource, ip: p.ActiveIP, port: p.ActivePort}, &v)
+	return v
 }
 
 type App struct {
@@ -219,6 +226,7 @@ func main() {
 	mux.HandleFunc("/api/pool/create", app.auth(app.createPool))
 	mux.HandleFunc("/api/pool/delete", app.auth(app.deletePool))
 	mux.HandleFunc("/api/pool/switch", app.auth(app.switchPool))
+	mux.HandleFunc("/api/pool/speedtest", app.auth(app.speedTestPool))
 	mux.HandleFunc("/api/pool/source", app.auth(app.setPoolSource))
 	mux.HandleFunc("/api/refresh", app.auth(app.refreshNow))
 	mux.HandleFunc("/telegram", app.auth(app.telegramPage))
@@ -534,6 +542,7 @@ func (a *App) deletePool(w http.ResponseWriter, r *http.Request) {
 	}
 	dropCandidateScanState(id)
 	dropAutoRetry(id)
+	dropSpeedTestState(id)
 	if a.telegram != nil && a.telegram.isPoolPaused(id) {
 		a.telegram.setPoolPaused(id, false)
 	}
