@@ -48,3 +48,18 @@ func TestFlagEmojiFallback(t *testing.T) {
 		t.Fatalf("invalid country should fall back, got %q", got)
 	}
 }
+
+func TestTelegramExitLabelIncludesIPType(t *testing.T) {
+	v := PoolView{ExitIP: "203.0.113.8", IPType: "住宅/ISP"}
+	if got := telegramExitLabel(v); got != "203.0.113.8（住宅/ISP）" {
+		t.Fatalf("telegramExitLabel=%q", got)
+	}
+	v.IPType = ""
+	if got := telegramExitLabel(v); got != "203.0.113.8（暂未识别）" {
+		t.Fatalf("telegramExitLabel pending=%q", got)
+	}
+	v.ExitIP = ""
+	if got := telegramExitLabel(v); got != "-" {
+		t.Fatalf("telegramExitLabel empty=%q", got)
+	}
+}
