@@ -831,6 +831,24 @@ func tgStatusIcon(status string) string {
 	}
 }
 
+func telegramIPType(v PoolView) string {
+	if s := strings.TrimSpace(v.IPType); s != "" {
+		return s
+	}
+	if strings.TrimSpace(v.ExitIP) != "" {
+		return "暂未识别"
+	}
+	return "-"
+}
+
+func telegramExitLabel(v PoolView) string {
+	ip := strings.TrimSpace(v.ExitIP)
+	if ip == "" {
+		return "-"
+	}
+	return fmt.Sprintf("%s（%s）", ip, telegramIPType(v))
+}
+
 func (t *TelegramManager) statusText() string {
 	views := t.poolViews()
 	if len(views) == 0 {
@@ -857,6 +875,10 @@ func (t *TelegramManager) statusText() string {
 		}
 		if v.ExitIP != "" {
 			fmt.Fprintf(&b, "出口：%s\n", v.ExitIP)
+			fmt.Fprintf(&b, "属性：%s\n", telegramIPType(v))
+			if strings.TrimSpace(v.IPISP) != "" {
+				fmt.Fprintf(&b, "ISP：%s\n", strings.TrimSpace(v.IPISP))
+			}
 		} else {
 			b.WriteString("出口：-\n")
 		}
@@ -1055,6 +1077,18 @@ func (t *TelegramManager) notifySwitchSuccess(p *Pool, before PoolView, phase st
 			after = p.view()
 		}
 	}
+	if after.ExitIP != "" && after.IPType == "" {
+		deadline := time.Now().Add(3 * time.Second)
+		for after.Status == "up" && after.ExitIP != "" && after.IPType == "" && time.Now().Before(deadline) {
+			time.Sleep(250 * time.Millisecond)
+			next := p.view()
+			if next.ExitIP != after.ExitIP {
+				after = next
+				break
+			}
+			after = next
+		}
+	}
 	t.mu.RLock()
 	isRecovery := before.Status == "failed" || before.Status == "no-candidates" || before.Status == "restoring"
 	on := t.cfg.Enabled && t.cfg.ChatID != 0 && ((isRecovery && t.cfg.NotifyRecovery) || (!isRecovery && t.cfg.NotifySwitch))
@@ -1066,15 +1100,15 @@ func (t *TelegramManager) notifySwitchSuccess(p *Pool, before PoolView, phase st
 	if isRecovery {
 		title = "✅ " + poolDisplay(after) + " 已恢复正常"
 	}
-	oldIP := before.ExitIP
-	if oldIP == "" {
-		oldIP = "-"
-	}
-	newIP := after.ExitIP
-	if newIP == "" {
+	oldIP := telegramExitLabel(before)
+	newIP := telegramExitLabel(after)
+	if after.ExitIP == "" {
 		newIP = "获取中"
 	}
 	msg := fmt.Sprintf("%s\n\n来源：%s\n旧出口：%s\n新出口：%s", title, sourceLabel(after.ActiveSource), oldIP, newIP)
+	if strings.TrimSpace(after.IPISP) != "" {
+		msg += "\nISP：" + strings.TrimSpace(after.IPISP)
+	}
 	if after.NodeLatencyMS >= 0 {
 		msg += fmt.Sprintf("\n节点延迟：%d ms", after.NodeLatencyMS)
 	}
