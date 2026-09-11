@@ -547,7 +547,7 @@ func (t *TelegramManager) handleCallback(token string, q *tgCallback) {
 				t.sendTo(token, chatID, "当前出口未处于正常状态，无法测速。", nil)
 				return
 			}
-			t.sendTo(token, chatID, "🚀 正在测速 "+poolDisplay(v)+"…\n最长约 8 秒，测试流量最多约 50 MB。", nil)
+			t.sendTo(token, chatID, "🚀 正在测速 "+poolDisplay(v)+"…\n下载/上传各最长约 8 秒、各最多约 50 MB。", nil)
 			go func() {
 				result, err := runPoolSpeedTest(p)
 				if err != nil {
@@ -555,7 +555,7 @@ func (t *TelegramManager) handleCallback(token string, q *tgCallback) {
 					return
 				}
 				after := p.view()
-				msg := fmt.Sprintf("🚀 %s 测速完成\n\n出口：%s\n下载：%.1f Mbps\n      %.2f MB/s\n测试流量：%.1f MB\n耗时：%.2f 秒", poolDisplay(after), telegramExitLabel(after), result.Mbps, result.MBps, float64(result.Bytes)/1_000_000, float64(result.DurationMS)/1000)
+				msg := fmt.Sprintf("🚀 %s 测速完成\n\n出口：%s\n下载：%.2f MB/s\n上传：%.2f MB/s\n下载流量：%.1f MB\n上传流量：%.1f MB\n耗时：%.2f 秒", poolDisplay(after), telegramExitLabel(after), result.MBps, result.UploadMBps, float64(result.Bytes)/1_000_000, float64(result.UploadBytes)/1_000_000, float64(result.DurationMS+result.UploadDurationMS)/1000)
 				t.sendTo(token, chatID, msg, nil)
 			}()
 			return
